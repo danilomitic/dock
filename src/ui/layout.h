@@ -30,4 +30,22 @@ double MagnifyFalloff(double distance, double radius);
 // presence[i] in 0..1 scales an icon's slot while it is added or removed.
 LayoutResult ComputeLayout(const std::vector<double>& presence, const LayoutParams& p);
 
+// ---- Screen edges ----
+// The dock is laid out in "dock space": u runs along the screen edge,
+// v grows away from the edge (0 = the edge itself). These map it to the window.
+enum class Edge { Bottom, Left, Right };
+
+struct DockRect {
+    double u = 0, v = 0, du = 0, dv = 0;
+};
+struct WinRect {
+    double x = 0, y = 0, w = 0, h = 0;
+};
+
+Edge ParseEdge(const char* name);
+WinRect ToWindow(Edge e, const DockRect& r, double winW, double winH);
+void ToDock(Edge e, double x, double y, double winW, double winH, double& u, double& v);
+// Moves something by `dv` away from (positive) or toward (negative) the edge, in window coords.
+void EdgeOffset(Edge e, double dv, double& dx, double& dy);
+
 }  // namespace dx

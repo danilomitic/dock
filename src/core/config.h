@@ -16,6 +16,17 @@ struct Config {
     std::string language = "sr";      // "sr" | "en"
     std::string theme = "dark";       // "dark" | "light"
 
+    // Placement and hiding
+    std::string position = "bottom";  // "bottom" | "left" | "right"
+    bool reserveSpace = true;         // maximized windows stop at the dock (when not auto-hiding)
+    bool autoHide = false;
+    double showDelay = 0.0;           // seconds before an auto-hidden dock appears
+    double hideDelay = 0.4;           // seconds before it hides again
+    bool hideInFullscreen = true;
+    bool hideTaskbar = false;         // auto-hide the Windows taskbar while DockX runs
+    bool taskbarHiddenByDock = false; // internal: restore the taskbar on exit/crash
+    int taskbarOriginalState = 0;     // internal: ABM_GETSTATE before we changed it
+
     double iconSize = 48;
     double spacing = 6;
     double shelfPadding = 6;

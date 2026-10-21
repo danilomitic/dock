@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <string_view>
 
 namespace dx {
 
@@ -65,6 +66,42 @@ LayoutResult ComputeLayout(const std::vector<double>& presence, const LayoutPara
     r.start = start;
     r.end = start + mag[n];
     return r;
+}
+
+Edge ParseEdge(const char* name) {
+    const std::string_view s(name);
+    if (s == "left") return Edge::Left;
+    if (s == "right") return Edge::Right;
+    return Edge::Bottom;
+}
+
+WinRect ToWindow(Edge e, const DockRect& r, double winW, double winH) {
+    switch (e) {
+        case Edge::Left: return {r.v, r.u, r.dv, r.du};
+        case Edge::Right: return {winW - r.v - r.dv, r.u, r.dv, r.du};
+        case Edge::Bottom:
+        default: return {r.u, winH - r.v - r.dv, r.du, r.dv};
+    }
+}
+
+void ToDock(Edge e, double x, double y, double winW, double winH, double& u, double& v) {
+    switch (e) {
+        case Edge::Left: u = y; v = x; break;
+        case Edge::Right: u = y; v = winW - x; break;
+        case Edge::Bottom:
+        default: u = x; v = winH - y; break;
+    }
+}
+
+void EdgeOffset(Edge e, double dv, double& dx, double& dy) {
+    dx = 0;
+    dy = 0;
+    switch (e) {
+        case Edge::Left: dx = dv; break;
+        case Edge::Right: dx = -dv; break;
+        case Edge::Bottom:
+        default: dy = -dv; break;
+    }
 }
 
 }  // namespace dx

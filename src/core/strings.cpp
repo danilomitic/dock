@@ -44,6 +44,12 @@ const wchar_t* Tr(Text t) {
         case Text::Settings: return g_serbian ? L"Podešavanja Docka…" : L"Dock Settings…";
         case Text::NoWindows: return g_serbian ? L"Nema prozora" : L"No windows";
         case Text::DarkTheme: return g_serbian ? L"Tamna tema" : L"Dark theme";
+        case Text::AutoHide: return g_serbian ? L"Automatski sakrij Dock" : L"Automatically hide the Dock";
+        case Text::Position: return g_serbian ? L"Položaj na ekranu" : L"Position on screen";
+        case Text::PositionLeft: return g_serbian ? L"Levo" : L"Left";
+        case Text::PositionBottom: return g_serbian ? L"Dole" : L"Bottom";
+        case Text::PositionRight: return g_serbian ? L"Desno" : L"Right";
+        case Text::HideTaskbar: return g_serbian ? L"Sakrij Windows taskbar" : L"Hide the Windows taskbar";
     }
     return L"";
 }

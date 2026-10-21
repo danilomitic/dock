@@ -18,6 +18,12 @@ enum class Text {
     Settings,
     NoWindows,
     DarkTheme,
+    AutoHide,
+    Position,
+    PositionLeft,
+    PositionBottom,
+    PositionRight,
+    HideTaskbar,
 };
 void SetLanguage(std::string_view lang);
 const wchar_t* Tr(Text t);

@@ -28,6 +28,7 @@ add_executable(DockX WIN32
   src/render/graphics.cpp
   src/shell/apps.cpp
   src/shell/icons.cpp
+  src/shell/screen.cpp
   src/ui/dock.cpp
   src/app.manifest)
 target_link_libraries(DockX PRIVATE dockcore

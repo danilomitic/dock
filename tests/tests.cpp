@@ -94,6 +94,29 @@ void TestContinuityAcrossSlots() {
     }
 }
 
+void TestEdges() {
+    const double W = 300, H = 1000;  // a left/right dock window is tall
+    for (dx::Edge e : {dx::Edge::Bottom, dx::Edge::Left, dx::Edge::Right}) {
+        const double ww = e == dx::Edge::Bottom ? 1000 : W;
+        const double wh = e == dx::Edge::Bottom ? W : H;
+        const dx::DockRect r{100, 10, 48, 60};
+        const dx::WinRect w = dx::ToWindow(e, r, ww, wh);
+        // A point inside the rect maps back to the same dock coordinates.
+        double u = 0, v = 0;
+        dx::ToDock(e, w.x + w.w / 2, w.y + w.h / 2, ww, wh, u, v);
+        CHECK(Near(u, r.u + r.du / 2));
+        CHECK(Near(v, r.v + r.dv / 2));
+        CHECK(w.x >= 0 && w.y >= 0 && w.x + w.w <= ww && w.y + w.h <= wh);
+    }
+    CHECK(dx::ParseEdge("left") == dx::Edge::Left);
+    CHECK(dx::ParseEdge("bogus") == dx::Edge::Bottom);
+    double ox = 0, oy = 0;
+    dx::EdgeOffset(dx::Edge::Bottom, 10, ox, oy);
+    CHECK(Near(oy, -10) && Near(ox, 0));
+    dx::EdgeOffset(dx::Edge::Right, 10, ox, oy);
+    CHECK(Near(ox, -10));
+}
+
 void TestSpring() {
     dx::Spring s;
     s.target = 1;
@@ -119,12 +142,18 @@ void TestJsonAndConfig() {
     dx::Config c;
     c.iconSize = 52;
     c.theme = "light";
+    c.position = "right";
+    c.autoHide = true;
+    c.taskbarOriginalState = 2;
     c.glassTint = 0x123456;
     c.pinned.push_back({L"C:\\Windows\\explorer.exe", L""});
     c.pinned.push_back({L"", L"Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"});
     const dx::Config d = dx::ParseConfig(dx::SerializeConfig(c));
     CHECK(Near(d.iconSize, 52));
     CHECK(d.theme == "light");
+    CHECK(d.position == "right");
+    CHECK(d.autoHide);
+    CHECK(d.taskbarOriginalState == 2);
     CHECK(d.glassTint && *d.glassTint == 0x123456);
     CHECK(d.pinnedInitialized && d.pinned.size() == 2);
     CHECK(d.pinned[0].path == L"C:\\Windows\\explorer.exe");
@@ -138,6 +167,7 @@ int main() {
     TestCursorPointStaysFixed();
     TestNoOverlapAndMonotonic();
     TestContinuityAcrossSlots();
+    TestEdges();
     TestSpring();
     TestJsonAndConfig();
     if (g_failed) {

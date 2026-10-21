@@ -20,6 +20,8 @@ Dock* g_dock = nullptr;
 
 constexpr UINT_PTR kTimerRescan = 1;
 constexpr UINT_PTR kTimerRescanLate = 2;
+constexpr UINT_PTR kTimerShow = 3;
+constexpr UINT_PTR kTimerHide = 4;
 
 constexpr double kLaunchBouncePeriod = 0.62;
 constexpr double kAttentionBouncePeriod = 0.5;
@@ -28,6 +30,8 @@ constexpr double kMaxLaunchBounce = 10.0;
 float F(double v) { return static_cast<float>(v); }
 
 bool EndsWith(const std::wstring& s, const wchar_t* suffix) { return Lower(s).ends_with(suffix); }
+
+UINT Ms(double seconds) { return static_cast<UINT>(std::max(1.0, seconds * 1000)); }
 
 }  // namespace
 
@@ -77,9 +81,18 @@ void FrameClock::Loop() {
 // ---------------------------------------------------------------- Dock setup
 
 Dock::~Dock() {
+    Log(L"shutdown: start");
     if (cloakHook_) UnhookWinEvent(cloakHook_);
+    if (foregroundHook_) UnhookWinEvent(foregroundHook_);
     icons_.Stop();
+    Log(L"shutdown: icons stopped");
     clock_.Shutdown();
+    Log(L"shutdown: clock stopped");
+    RestoreTaskbar();
+    Log(L"shutdown: taskbar restored");
+    appBar_.Remove();
+    Log(L"shutdown: appbar removed");
+    if (edgeWnd_) DestroyWindow(edgeWnd_);
     if (hwnd_) {
         DeregisterShellHookWindow(hwnd_);
         DestroyWindow(hwnd_);
@@ -111,10 +124,16 @@ bool Dock::Create(HINSTANCE instance) {
     DwmSetWindowAttribute(hwnd_, DWMWA_EXCLUDED_FROM_PEEK, &on, sizeof(on));
 
     if (!gfx_.Init(hwnd_)) return false;
+    CreateEdgeTrigger(instance);
 
     magnify_.damping = 1.0;
+    hide_.damping = 1.0;
+    hide_.response = 0.35;
+
+    appBar_.Register(hwnd_, WM_APP_BAR);
+    ApplyTaskbarSetting();
     ComputeMetrics();
-    PositionWindow();
+    PositionWindow(true);
     BuildChrome();
     BuildShadow();
     ApplyTheme();
@@ -124,25 +143,49 @@ bool Dock::Create(HINSTANCE instance) {
 
     LoadPinned();
     Rescan();
+
+    fullscreen_ = cfg_.hideInFullscreen && IsFullscreenOnPrimary(hwnd_);
+    if (AutoHideActive()) {
+        hide_.target = 1;
+        hide_.Snap();
+    }
     ApplyLayout();
     UpdateRegion();
     ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    if (hide_.target == 1) {
+        PlaceEdgeTrigger();
+        ShowWindow(edgeWnd_, SW_SHOWNOACTIVATE);
+    }
 
     shellHookMsg_ = RegisterWindowMessageW(L"SHELLHOOK");
     taskbarCreatedMsg_ = RegisterWindowMessageW(L"TaskbarCreated");
     RegisterShellHookWindow(hwnd_);
     cloakHook_ = SetWinEventHook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, WinEventProc, 0, 0,
                                  WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-    Log(L"DockX started: %d items, scale %.2f", static_cast<int>(items_.size()), m_.scale);
+    foregroundHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, WinEventProc, 0, 0,
+                                      WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    StartWatchdog(hwnd_);
+    Log(L"DockX started: %d items, scale %.2f, edge %S", static_cast<int>(items_.size()), m_.scale, cfg_.position.c_str());
     return true;
 }
 
+void Dock::CreateEdgeTrigger(HINSTANCE instance) {
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc = EdgeProc;
+    wc.hInstance = instance;
+    wc.lpszClassName = L"DockX.Edge";
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    RegisterClassExW(&wc);
+    // Invisible (no content) but it still receives the mouse: the auto-hide trigger.
+    edgeWnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                               wc.lpszClassName, L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance, nullptr);
+}
+
 void Dock::ComputeMetrics() {
+    edge_ = ParseEdge(cfg_.position.c_str());
     const HMONITOR mon = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
     UINT dpiX = 96, dpiY = 96;
     GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
-    MONITORINFO mi{sizeof(mi)};
-    GetMonitorInfoW(mon, &mi);
 
     Metrics& m = m_;
     m.scale = dpiX / 96.0;
@@ -151,31 +194,70 @@ void Dock::ComputeMetrics() {
     m.maxIcon = cfg_.magnification ? std::max(m.icon, std::round(cfg_.magnifiedSize * s)) : m.icon;
     m.gap = cfg_.spacing * s;
     m.padSide = cfg_.shelfPadding * s;
-    m.padTop = std::round(std::max(4.0 * s, m.icon * 0.1));
-    m.padBottom = m.padTop + std::round(6 * s);
+    m.padFar = std::round(std::max(4.0 * s, m.icon * 0.1));
+    m.padNear = m.padFar + std::round(6 * s);
     m.dot = std::round(4 * s);
-    m.marginBottom = std::round(6 * s);
+    m.margin = std::round(6 * s);
     m.labelH = std::round(24 * s);
+    m.labelMaxW = std::round(240 * s);
     m.labelGap = std::round(8 * s);
     m.bounce = m.icon * 0.55;
-    m.shelfH = m.padTop + m.icon + m.padBottom;
+    m.shelfH = m.padFar + m.icon + m.padNear;
     m.radius = std::min(cfg_.cornerRadius * s, m.shelfH / 2);
+    m.iconNear = m.margin + m.padNear;
 
-    const double grow = m.maxIcon - m.icon;
-    const double bounceExtra = std::max(0.0, 1.5 * m.bounce - grow);
-    m.winW = mi.rcWork.right - mi.rcWork.left;
-    m.winH = static_cast<int>(std::ceil(m.marginBottom + m.shelfH + grow + bounceExtra + m.labelGap + m.labelH + 4 * s));
-    m.shelfTop = m.winH - m.marginBottom - m.shelfH;
-    m.baseline = m.shelfTop + m.padTop + m.icon;
+    const double labelDepth = edge_ == Edge::Bottom ? m.labelH : m.labelMaxW;
+    const double iconReach = std::max(m.maxIcon, m.icon + 1.5 * m.bounce);
+    m.depth = std::ceil(m.iconNear + iconReach + m.labelGap + labelDepth + 4 * s);
 }
 
-void Dock::PositionWindow() {
+void Dock::PositionWindow(bool force) {
     const HMONITOR mon = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
     MONITORINFO mi{sizeof(mi)};
     GetMonitorInfoW(mon, &mi);
-    SetWindowPos(hwnd_, HWND_TOPMOST, mi.rcWork.left, mi.rcWork.bottom - m_.winH, m_.winW, m_.winH,
-                 SWP_NOACTIVATE);
-    region_ = {};
+    const int thickness = (cfg_.reserveSpace && !cfg_.autoHide) ? static_cast<int>(std::ceil(m_.margin + m_.shelfH)) : 0;
+    const RECT bar = appBar_.Place(edge_, thickness, mi.rcMonitor, force);
+    const bool barOk = (bar.left | bar.top | bar.right | bar.bottom) != 0;  // false if the AppBar is not registered
+    GetMonitorInfoW(mon, &mi);  // the work area may have changed
+    const RECT& work = mi.rcWork;
+
+    const int depth = static_cast<int>(m_.depth);
+    int x = 0, y = 0, w = 0, h = 0;
+    switch (edge_) {
+        case Edge::Left: {
+            const int outer = barOk ? bar.left : work.left;
+            x = outer;
+            y = work.top;
+            w = depth;
+            h = work.bottom - work.top;
+            break;
+        }
+        case Edge::Right: {
+            const int outer = barOk ? bar.right : work.right;
+            x = outer - depth;
+            y = work.top;
+            w = depth;
+            h = work.bottom - work.top;
+            break;
+        }
+        case Edge::Bottom:
+        default: {
+            const int outer = barOk ? bar.bottom : work.bottom;
+            x = work.left;
+            y = outer - depth;
+            w = work.right - work.left;
+            h = depth;
+            break;
+        }
+    }
+    m_.winX = x;
+    m_.winY = y;
+    m_.winW = w;
+    m_.winH = h;
+    m_.axis = edge_ == Edge::Bottom ? w : h;
+    SetWindowPos(hwnd_, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+    region_ = {-1, -1, -1, -1};
+    regionEmpty_ = false;
 }
 
 void Dock::BuildChrome() {
@@ -274,18 +356,27 @@ void Dock::ApplyTheme() {
     for (auto& it : items_) it->dotVisual.Brush(dotBrush);
 
     labelFormat_ = nullptr;
-    gfx_.DWrite()->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                                    DWRITE_FONT_STRETCH_NORMAL, F(13 * m_.scale), L"", labelFormat_.put());
+    if (SUCCEEDED(gfx_.DWrite()->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                                  F(13 * m_.scale), L"", labelFormat_.put()))) {
+        // Long names end in "…" instead of wrapping.
+        labelFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        winrt::com_ptr<IDWriteInlineObject> ellipsis;
+        gfx_.DWrite()->CreateEllipsisTrimmingSign(labelFormat_.get(), ellipsis.put());
+        const DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        labelFormat_->SetTrimming(&trimming, ellipsis.get());
+    }
     labelItemId_ = 0;
     label_.IsVisible(false);
 }
 
-void Dock::Rebuild() {
+void Dock::Rebuild(bool forceBar) {
     ComputeMetrics();
-    PositionWindow();
+    PositionWindow(forceBar);
     BuildShadow();
     ApplyTheme();
     for (auto& it : items_) RequestIcon(*it);
+    if (IsWindowVisible(edgeWnd_)) PlaceEdgeTrigger();
     ApplyLayout();
     UpdateRegion();
 }
@@ -404,6 +495,7 @@ void Dock::Rescan() {
     for (auto& it : items_) it->windows.clear();
 
     for (const AppWindow& w : windows) {
+        if (w.hwnd == edgeWnd_) continue;
         const std::wstring aumid = Lower(w.aumid);
         const std::wstring exe = Lower(w.exe);
         DockItem* target = nullptr;
@@ -453,35 +545,34 @@ void Dock::SavePinned() {
 
 // ---------------------------------------------------------------- Interaction
 
-int Dock::HitTest(double x) const {
+int Dock::HitTest(double u) const {
     const size_t n = std::min(items_.size(), layout_.slotLeft.size());
     for (size_t i = 0; i < n; ++i)
-        if (x >= layout_.slotLeft[i] && x < layout_.slotRight[i]) return static_cast<int>(i);
+        if (u >= layout_.slotLeft[i] && u < layout_.slotRight[i]) return static_cast<int>(i);
     return -1;
 }
 
 void Dock::OnMouseMove(int x, int y) {
-    mouseX_ = x;
-    mouseY_ = y;
+    ToDock(edge_, x, y, m_.winW, m_.winH, mouseU_, mouseV_);
+    const double u = mouseU_, v = mouseV_;
     if (!trackingLeave_) {
         TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, hwnd_, 0};
         TrackMouseEvent(&t);
         trackingLeave_ = true;
     }
-    const int idx = HitTest(x);
+    const int idx = HitTest(u);
     if (!hovering_) {
-        const bool inShelf = x >= shelfLeft_ && x <= shelfRight_ && y >= m_.shelfTop && y <= m_.shelfTop + m_.shelfH;
+        const bool inShelf = hide_.target == 0 && u >= shelfLeft_ && u <= shelfRight_ && v >= 0 && v <= m_.margin + m_.shelfH;
         if (!inShelf) return;
-        Log(L"hover enter %d,%d", x, y);
         hovering_ = true;
+        KillTimer(hwnd_, kTimerHide);
         magnify_.target = cfg_.magnification ? 1 : 0;
         UpdateRegion();
     } else {
-        // Stay "inside" up to the top of the (magnified) icon under the cursor.
-        const double top = idx >= 0 ? std::min(items_[idx]->top, m_.shelfTop) : m_.shelfTop;
-        const bool inside = x >= shelfLeft_ - 2 && x <= shelfRight_ + 2 && y >= top - 2 * m_.scale;
+        // Stay "inside" up to the far side of the (magnified) icon under the cursor.
+        const double reach = std::max(idx >= 0 ? items_[idx]->reach : 0.0, m_.margin + m_.shelfH);
+        const bool inside = u >= shelfLeft_ - 2 && u <= shelfRight_ + 2 && v <= reach + 2 * m_.scale;
         if (!inside) {
-            Log(L"hover exit (outside) %d,%d top=%.1f shelf=%.1f..%.1f", x, y, top, shelfLeft_, shelfRight_);
             OnMouseLeave();
             return;
         }
@@ -501,6 +592,7 @@ void Dock::OnMouseLeave() {
         pressedId_ = 0;
         ReleaseCapture();
     }
+    if (AutoHideActive()) SetTimer(hwnd_, kTimerHide, Ms(cfg_.hideDelay), nullptr);
     UpdateLabel();
     StartAnimating();
 }
@@ -556,7 +648,10 @@ void Dock::StartBounce(DockItem& it, bool attention) {
 }
 
 void Dock::ShowContextMenu(DockItem* it, POINT pt) {
-    enum : UINT { kKeep = 1, kShow, kClose, kMagnify, kDark, kQuitDock, kWindow = 100 };
+    enum : UINT {
+        kKeep = 1, kShow, kClose, kMagnify, kDark, kAutoHide, kPosLeft, kPosBottom, kPosRight, kHideTaskbar, kQuitDock,
+        kWindow = 100
+    };
     HMENU menu = CreatePopupMenu();
     const int id = it ? it->id : 0;
     if (it) {
@@ -573,20 +668,38 @@ void Dock::ShowContextMenu(DockItem* it, POINT pt) {
             AppendMenuW(menu, MF_STRING, kClose, Tr(Text::Quit));
         }
     } else {
+        AppendMenuW(menu, MF_STRING | (cfg_.autoHide ? MF_CHECKED : 0), kAutoHide, Tr(Text::AutoHide));
         AppendMenuW(menu, MF_STRING | (cfg_.magnification ? MF_CHECKED : 0), kMagnify, Tr(Text::Magnification));
+        HMENU pos = CreatePopupMenu();
+        AppendMenuW(pos, MF_STRING | (edge_ == Edge::Left ? MF_CHECKED : 0), kPosLeft, Tr(Text::PositionLeft));
+        AppendMenuW(pos, MF_STRING | (edge_ == Edge::Bottom ? MF_CHECKED : 0), kPosBottom, Tr(Text::PositionBottom));
+        AppendMenuW(pos, MF_STRING | (edge_ == Edge::Right ? MF_CHECKED : 0), kPosRight, Tr(Text::PositionRight));
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pos), Tr(Text::Position));
+        AppendMenuW(menu, MF_STRING | (cfg_.hideTaskbar ? MF_CHECKED : 0), kHideTaskbar, Tr(Text::HideTaskbar));
         AppendMenuW(menu, MF_STRING | (cfg_.theme != "light" ? MF_CHECKED : 0), kDark, Tr(Text::DarkTheme));
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kQuitDock, Tr(Text::QuitDock));
     }
 
+    UINT align = TPM_BOTTOMALIGN | TPM_CENTERALIGN;
+    if (edge_ == Edge::Left) align = TPM_LEFTALIGN | TPM_VCENTERALIGN;
+    if (edge_ == Edge::Right) align = TPM_RIGHTALIGN | TPM_VCENTERALIGN;
+
+    menuOpen_ = true;
     SetForegroundWindow(hwnd_);
-    const UINT cmd = static_cast<UINT>(TrackPopupMenuEx(
-        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_BOTTOMALIGN | TPM_CENTERALIGN, pt.x, pt.y, hwnd_, nullptr));
+    const UINT cmd = static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | align, pt.x, pt.y, hwnd_, nullptr));
     PostMessageW(hwnd_, WM_NULL, 0, 0);
-    DestroyMenu(menu);
+    DestroyMenu(menu);  // also destroys the submenu
+    menuOpen_ = false;
     OnMouseLeave();
 
     it = id ? FindItem(id) : nullptr;  // the item list may have changed
+    auto setPosition = [this](const char* p) {
+        if (cfg_.position == p) return;
+        cfg_.position = p;
+        SaveConfig(cfg_);
+        Rebuild(true);
+    };
     switch (cmd) {
         case 0: break;
         case kKeep:
@@ -619,12 +732,27 @@ void Dock::ShowContextMenu(DockItem* it, POINT pt) {
         case kMagnify:
             cfg_.magnification = !cfg_.magnification;
             SaveConfig(cfg_);
-            Rebuild();
+            Rebuild(false);
             break;
         case kDark:
             cfg_.theme = cfg_.theme == "light" ? "dark" : "light";
             SaveConfig(cfg_);
             ApplyTheme();
+            break;
+        case kAutoHide:
+            cfg_.autoHide = !cfg_.autoHide;
+            SaveConfig(cfg_);
+            PositionWindow(true);  // reserve or release screen space
+            SetHidden(AutoHideActive());
+            ApplyLayout();
+            break;
+        case kPosLeft: setPosition("left"); break;
+        case kPosBottom: setPosition("bottom"); break;
+        case kPosRight: setPosition("right"); break;
+        case kHideTaskbar:
+            cfg_.hideTaskbar = !cfg_.hideTaskbar;
+            SaveConfig(cfg_);
+            ApplyTaskbarSetting();
             break;
         case kQuitDock:
             DestroyWindow(hwnd_);
@@ -635,7 +763,91 @@ void Dock::ShowContextMenu(DockItem* it, POINT pt) {
     }
 }
 
+// ---------------------------------------------------------------- Hiding
+
+bool Dock::AutoHideActive() const { return cfg_.autoHide || fullscreen_; }
+
+void Dock::SetHidden(bool hidden) {
+    const double target = hidden ? 1 : 0;
+    if (hide_.target == target) return;
+    hide_.target = target;
+    if (!hidden) {
+        ShowWindow(edgeWnd_, SW_HIDE);
+    } else {
+        KillTimer(hwnd_, kTimerHide);
+    }
+    UpdateLabel();
+    UpdateRegion();
+    StartAnimating();
+}
+
+void Dock::OnEdgeHover() {
+    if (!AutoHideActive() || hide_.target == 0 || showPending_) return;
+    if (cfg_.showDelay > 0) {
+        showPending_ = true;
+        SetTimer(hwnd_, kTimerShow, Ms(cfg_.showDelay), nullptr);
+        return;
+    }
+    SetHidden(false);
+    // Hide again if the mouse never actually moves onto the dock.
+    SetTimer(hwnd_, kTimerHide, Ms(std::max(cfg_.hideDelay, 0.8)), nullptr);
+}
+
+void Dock::UpdateFullscreen() {
+    const bool fs = cfg_.hideInFullscreen && IsFullscreenOnPrimary(hwnd_);
+    if (fs == fullscreen_) return;
+    fullscreen_ = fs;
+    Log(L"fullscreen: %d", fs ? 1 : 0);
+    if (AutoHideActive()) {
+        if (!hovering_) SetHidden(true);
+    } else {
+        SetHidden(false);
+    }
+}
+
+void Dock::ApplyTaskbarSetting() {
+    if (!cfg_.hideTaskbar) {
+        RestoreTaskbar();
+        return;
+    }
+    if (cfg_.taskbarHiddenByDock) return;  // already hidden by us (e.g. after a crash)
+    const UINT state = GetTaskbarState();
+    if (state & ABS_AUTOHIDE) return;      // the user already auto-hides it
+    cfg_.taskbarOriginalState = static_cast<int>(state);
+    cfg_.taskbarHiddenByDock = true;
+    SaveConfig(cfg_);  // saved first, so the watchdog can undo it if we crash
+    SetTaskbarState(state | ABS_AUTOHIDE);
+}
+
+void Dock::RestoreTaskbar() {
+    if (!cfg_.taskbarHiddenByDock) return;
+    SetTaskbarState(static_cast<UINT>(cfg_.taskbarOriginalState));
+    cfg_.taskbarHiddenByDock = false;
+    SaveConfig(cfg_);
+}
+
+void Dock::RestShelfSpan(double& left, double& right) const {
+    double total = 0;
+    for (const auto& it : items_) total += (m_.icon + m_.gap) * std::clamp(it->presence.target, 0.0, 1.0);
+    left = m_.axis / 2 - total / 2 + m_.gap / 2 - m_.padSide;
+    right = m_.axis / 2 + total / 2 - m_.gap / 2 + m_.padSide;
+}
+
+void Dock::PlaceEdgeTrigger() {
+    double l = 0, r = 0;
+    RestShelfSpan(l, r);
+    l = std::max(0.0, l - m_.icon);
+    r = std::min(m_.axis, r + m_.icon);
+    const WinRect w = Map(l, 0, r - l, 2);
+    SetWindowPos(edgeWnd_, HWND_TOPMOST, m_.winX + static_cast<int>(w.x), m_.winY + static_cast<int>(w.y),
+                 static_cast<int>(std::ceil(w.w)), static_cast<int>(std::ceil(w.h)), SWP_NOACTIVATE);
+}
+
 // ---------------------------------------------------------------- Frame
+
+WinRect Dock::Map(double u, double v, double du, double dv) const {
+    return ToWindow(edge_, {u, v, du, dv}, m_.winW, m_.winH);
+}
 
 void Dock::StartAnimating() {
     if (clock_.Running()) return;
@@ -660,6 +872,11 @@ void Dock::Tick() {
         clock_.Halt();
         const double secs = static_cast<double>(now.QuadPart - animStart_.QuadPart) / static_cast<double>(qpcFreq_.QuadPart);
         if (secs > 0.2) Log(L"animation: %d frames in %.2f s = %.0f fps", animFrames_, secs, animFrames_ / secs);
+        // Fully hidden: arm the screen-edge trigger.
+        if (hide_.target == 1 && !IsWindowVisible(edgeWnd_)) {
+            PlaceEdgeTrigger();
+            ShowWindow(edgeWnd_, SW_SHOWNOACTIVATE);
+        }
     }
 }
 
@@ -672,6 +889,7 @@ bool Dock::StepAnimations(double dt) {
     };
     magnify_.response = cfg_.magnifyResponse;
     step(magnify_, 0.001);
+    step(hide_, 0.001);
 
     for (auto& p : items_) {
         DockItem& it = *p;
@@ -723,19 +941,25 @@ void Dock::ApplyLayout() {
     p.maxScale = m_.maxIcon / m_.icon;
     p.range = cfg_.magnificationRange;
     p.amount = magnify_.value;
-    p.mouseX = mouseX_;
-    p.centerX = m_.winW / 2.0;
+    p.mouseX = mouseU_;
+    p.centerX = m_.axis / 2.0;
     layout_ = ComputeLayout(presence, p);
 
     if (items_.empty()) {
-        shelfLeft_ = m_.winW / 2.0 - 30 * m_.scale;
-        shelfRight_ = m_.winW / 2.0 + 30 * m_.scale;
+        shelfLeft_ = m_.axis / 2.0 - 30 * m_.scale;
+        shelfRight_ = m_.axis / 2.0 + 30 * m_.scale;
     } else {
         shelfLeft_ = layout_.start + m_.gap / 2 - m_.padSide;
         shelfRight_ = layout_.end - m_.gap / 2 + m_.padSide;
     }
 
-    const float l = F(shelfLeft_), t = F(m_.shelfTop), w = F(shelfRight_ - shelfLeft_), h = F(m_.shelfH);
+    // Slide everything off the edge while auto-hidden.
+    double ox = 0, oy = 0;
+    EdgeOffset(edge_, -hide_.value * (m_.margin + m_.shelfH + shadowExtent_ + 4 * m_.scale), ox, oy);
+    gfx_.Root().Offset({F(ox), F(oy), 0});
+
+    const WinRect s = Map(shelfLeft_, m_.margin, shelfRight_ - shelfLeft_, m_.shelfH);
+    const float l = F(s.x), t = F(s.y), w = F(s.w), h = F(s.h);
     const float r = F(m_.radius);
     shelf_.Offset({l, t, 0});
     shelf_.Size({w, h});
@@ -752,24 +976,27 @@ void Dock::ApplyLayout() {
         shadow_.Size({w + 2 * e, h + 2 * e});
     }
 
-    const float d = F(m_.dot);
+    const double d = m_.dot;
     for (size_t i = 0; i < items_.size(); ++i) {
         DockItem& it = *items_[i];
         const double pr = std::clamp(it.presence.value, 0.0, 1.0);
         it.size = layout_.size[i];
-        it.cx = layout_.center[i];
-        it.top = m_.baseline - it.size - it.bounceOffset;
-        it.root.Offset({F(it.cx - it.size / 2), F(it.top), 0});
-        it.root.Size({F(it.size), F(it.size)});
+        it.cu = layout_.center[i];
+        const double nearV = m_.iconNear + it.bounceOffset;
+        it.reach = nearV + it.size;
+        const WinRect ir = Map(it.cu - it.size / 2, nearV, it.size, it.size);
+        it.root.Offset({F(ir.x), F(ir.y), 0});
+        it.root.Size({F(ir.w), F(ir.h)});
         it.root.Opacity(F(pr));
-        it.dotVisual.Offset({F(it.cx) - d / 2, F(m_.baseline + m_.padBottom / 2) - d / 2, 0});
+        const WinRect dr = Map(it.cu - d / 2, m_.margin + m_.padNear / 2 - d / 2, d, d);
+        it.dotVisual.Offset({F(dr.x), F(dr.y), 0});
         it.dotVisual.Opacity(cfg_.showDots ? F(it.dot.value * pr) : 0.0f);
     }
     UpdateLabel();
 }
 
 void Dock::UpdateLabel() {
-    const int want = (hovering_ && cfg_.showLabels && !pressedId_) ? hoverId_ : 0;
+    const int want = (hovering_ && cfg_.showLabels && !pressedId_ && hide_.target == 0) ? hoverId_ : 0;
     if (want != labelItemId_) {
         labelItemId_ = want;
         DockItem* it = want ? FindItem(want) : nullptr;
@@ -779,15 +1006,15 @@ void Dock::UpdateLabel() {
             return;
         }
         const std::wstring text = it->name.empty() ? L"…" : it->name;
+        const float s = F(m_.scale);
+        const float padX = 11 * s;
         winrt::com_ptr<IDWriteTextLayout> layout;
         if (FAILED(gfx_.DWrite()->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), labelFormat_.get(),
-                                                   4000.0f, 400.0f, layout.put())))
+                                                   F(m_.labelMaxW) - 2 * padX, 400.0f, layout.put())))
             return;
         DWRITE_TEXT_METRICS tm{};
         layout->GetMetrics(&tm);
-        const float s = F(m_.scale);
-        const float padX = 11 * s;
-        const float width = std::ceil(tm.widthIncludingTrailingWhitespace + 2 * padX);
+        const float width = std::ceil(std::min(tm.widthIncludingTrailingWhitespace, F(m_.labelMaxW) - 2 * padX) + 2 * padX);
         const float height = F(m_.labelH);
         const bool dark = cfg_.theme != "light";
         const auto surface = gfx_.CreateSurface(static_cast<int>(width), static_cast<int>(height));
@@ -809,9 +1036,12 @@ void Dock::UpdateLabel() {
     }
     if (labelItemId_) {
         if (const DockItem* it = FindItem(labelItemId_)) {
-            const double x = std::clamp(it->cx - labelW_ / 2, 2.0, m_.winW - labelW_ - 2);
-            const double y = it->top - m_.labelGap - m_.labelH;
-            label_.Offset({F(std::round(x)), F(std::round(y)), 0});
+            // Along the edge the label is as long as its text (bottom) or as tall as one line (sides).
+            const double du = edge_ == Edge::Bottom ? labelW_ : m_.labelH;
+            const double dv = edge_ == Edge::Bottom ? m_.labelH : labelW_;
+            const double u = std::clamp(it->cu - du / 2, 2.0, m_.axis - du - 2);
+            const WinRect r = Map(u, it->reach + m_.labelGap, du, dv);
+            label_.Offset({F(std::round(r.x)), F(std::round(r.y)), 0});
         }
     }
 }
@@ -819,23 +1049,31 @@ void Dock::UpdateLabel() {
 // The window only takes mouse input where the dock is; elsewhere clicks go to
 // the windows underneath. While hovering it covers the magnification area.
 void Dock::UpdateRegion() {
+    if (hide_.target == 1 && hide_.Settled(0.001)) {
+        if (regionEmpty_) return;
+        regionEmpty_ = true;
+        region_ = {};
+        SetWindowRgn(hwnd_, CreateRectRgn(0, 0, 0, 0), TRUE);
+        return;
+    }
     RECT want{};
-    if (hovering_ || !magnify_.Settled(0.002)) {
+    if (hovering_ || !magnify_.Settled(0.002) || !hide_.Settled(0.001)) {
         want = {0, 0, m_.winW, m_.winH};
     } else {
         const double e = shadowExtent_ + 8 * m_.scale;
-        want = {static_cast<LONG>(std::floor(shelfLeft_ - e)), static_cast<LONG>(std::floor(m_.shelfTop - shadowExtent_)),
-                static_cast<LONG>(std::ceil(shelfRight_ + e)), m_.winH};
-        for (const auto& it : items_) {
-            if (!it->bouncing) continue;
-            const double top = m_.baseline - m_.icon - m_.bounce * 1.5 - 2;
-            want.top = std::min(want.top, static_cast<LONG>(std::floor(top)));
-        }
+        double reach = m_.margin + m_.shelfH + shadowExtent_;
+        for (const auto& it : items_)
+            if (it->bouncing) reach = std::max(reach, m_.iconNear + m_.icon + 1.5 * m_.bounce + 2);
+        const WinRect r = Map(shelfLeft_ - e, 0, shelfRight_ - shelfLeft_ + 2 * e, reach);
+        want = {static_cast<LONG>(std::floor(r.x)), static_cast<LONG>(std::floor(r.y)),
+                static_cast<LONG>(std::ceil(r.x + r.w)), static_cast<LONG>(std::ceil(r.y + r.h))};
         want.left = std::max(want.left, 0L);
-        want.right = std::min(want.right, static_cast<LONG>(m_.winW));
         want.top = std::max(want.top, 0L);
+        want.right = std::min(want.right, static_cast<LONG>(m_.winW));
+        want.bottom = std::min(want.bottom, static_cast<LONG>(m_.winH));
     }
-    if (EqualRect(&want, &region_)) return;
+    if (!regionEmpty_ && EqualRect(&want, &region_)) return;
+    regionEmpty_ = false;
     region_ = want;
     HRGN rgn = CreateRectRgnIndirect(&want);
     if (!SetWindowRgn(hwnd_, rgn, TRUE)) DeleteObject(rgn);
@@ -853,8 +1091,25 @@ LRESULT CALLBACK Dock::WndProcStatic(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     return self ? self->WndProc(msg, wp, lp) : DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
-    if (g_dock && hwnd && idObject == OBJID_WINDOW && idChild == CHILDID_SELF && GetAncestor(hwnd, GA_ROOT) == hwnd)
+LRESULT CALLBACK Dock::EdgeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_MOUSEMOVE:
+            if (g_dock) g_dock->OnEdgeHover();
+            return 0;
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+        default:
+            return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+}
+
+void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
+    if (!g_dock) return;
+    if (event == EVENT_SYSTEM_FOREGROUND) {
+        g_dock->UpdateFullscreen();
+        return;
+    }
+    if (hwnd && idObject == OBJID_WINDOW && idChild == CHILDID_SELF && GetAncestor(hwnd, GA_ROOT) == hwnd)
         g_dock->ScheduleRescan(false);
 }
 
@@ -876,11 +1131,26 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case WM_APP_BAR:
+            switch (wp) {
+                case ABN_FULLSCREENAPP:
+                    UpdateFullscreen();
+                    break;
+                case ABN_POSCHANGED:
+                case ABN_STATECHANGE:
+                    PositionWindow(true);
+                    if (IsWindowVisible(edgeWnd_)) PlaceEdgeTrigger();
+                    ApplyLayout();
+                    UpdateRegion();
+                    break;
+                default:
+                    break;
+            }
+            return 0;
         case WM_MOUSEMOVE:
             OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_MOUSELEAVE:
-            Log(L"WM_MOUSELEAVE");
             trackingLeave_ = false;
             if (!pressedId_) OnMouseLeave();
             return 0;
@@ -895,18 +1165,34 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
+        case WM_WINDOWPOSCHANGED:
+            appBar_.WindowPosChanged();
+            break;
         case WM_TIMER:
             KillTimer(hwnd_, wp);
-            Rescan();
+            switch (wp) {
+                case kTimerShow:
+                    showPending_ = false;
+                    SetHidden(false);
+                    SetTimer(hwnd_, kTimerHide, Ms(std::max(cfg_.hideDelay, 0.8)), nullptr);
+                    break;
+                case kTimerHide:
+                    if (AutoHideActive() && !hovering_ && !menuOpen_) SetHidden(true);
+                    break;
+                default:
+                    Rescan();
+                    break;
+            }
             return 0;
         case WM_DPICHANGED:
         case WM_DISPLAYCHANGE:
-            Rebuild();
+            Rebuild(true);
             return 0;
         case WM_SETTINGCHANGE:
-            if (wp == SPI_SETWORKAREA) Rebuild();
+            if (wp == SPI_SETWORKAREA) Rebuild(false);
             break;
         case WM_DESTROY:
+            Log(L"WM_DESTROY");
             PostQuitMessage(0);
             return 0;
         default:
@@ -920,12 +1206,16 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     ScheduleRescan(true);
                 } else if (wp == HSHELL_WINDOWDESTROYED || wp == HSHELL_WINDOWACTIVATED || wp == HSHELL_RUDEAPPACTIVATED) {
                     ScheduleRescan(false);
+                    if (wp != HSHELL_WINDOWDESTROYED) UpdateFullscreen();
                 }
                 return 0;
             }
             if (taskbarCreatedMsg_ && msg == taskbarCreatedMsg_) {
+                // Explorer restarted: register everything again.
+                appBar_.Reset();
+                appBar_.Register(hwnd_, WM_APP_BAR);
                 RegisterShellHookWindow(hwnd_);
-                Rebuild();
+                Rebuild(true);
                 ScheduleRescan(true);
                 return 0;
             }

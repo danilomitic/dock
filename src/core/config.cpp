@@ -60,6 +60,18 @@ Config ParseConfig(std::string_view text) {
 
     c.language = v.Str("language", c.language);
     c.theme = v.Str("theme", c.theme) == "light" ? "light" : "dark";
+    {
+        const std::string pos = v.Str("position", c.position);
+        c.position = (pos == "left" || pos == "right") ? pos : "bottom";
+    }
+    c.reserveSpace = v.Bool("reserveSpace", c.reserveSpace);
+    c.autoHide = v.Bool("autoHide", c.autoHide);
+    c.showDelay = Clamp(v.Num("showDelay", c.showDelay), 0, 2);
+    c.hideDelay = Clamp(v.Num("hideDelay", c.hideDelay), 0, 5);
+    c.hideInFullscreen = v.Bool("hideInFullscreen", c.hideInFullscreen);
+    c.hideTaskbar = v.Bool("hideTaskbar", c.hideTaskbar);
+    c.taskbarHiddenByDock = v.Bool("taskbarHiddenByDock", c.taskbarHiddenByDock);
+    c.taskbarOriginalState = static_cast<int>(v.Num("taskbarOriginalState", c.taskbarOriginalState));
     c.iconSize = Clamp(v.Num("iconSize", c.iconSize), 16, 128);
     c.spacing = Clamp(v.Num("spacing", c.spacing), 0, 32);
     c.shelfPadding = Clamp(v.Num("shelfPadding", c.shelfPadding), 0, 32);
@@ -103,6 +115,15 @@ std::string SerializeConfig(const Config& c) {
     auto b = [](bool x) { return std::string(x ? "true" : "false"); };
     kv("language", json::Quote(c.language));
     kv("theme", json::Quote(c.theme));
+    kv("position", json::Quote(c.position));
+    kv("reserveSpace", b(c.reserveSpace));
+    kv("autoHide", b(c.autoHide));
+    kv("showDelay", json::Number(c.showDelay));
+    kv("hideDelay", json::Number(c.hideDelay));
+    kv("hideInFullscreen", b(c.hideInFullscreen));
+    kv("hideTaskbar", b(c.hideTaskbar));
+    kv("taskbarHiddenByDock", b(c.taskbarHiddenByDock));
+    kv("taskbarOriginalState", json::Number(c.taskbarOriginalState));
     kv("iconSize", json::Number(c.iconSize));
     kv("spacing", json::Number(c.spacing));
     kv("shelfPadding", json::Number(c.shelfPadding));
