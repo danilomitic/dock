@@ -24,6 +24,13 @@ enum class Text {
     PositionBottom,
     PositionRight,
     HideTaskbar,
+    Options,
+    ShowAllWindows,
+    Hide,
+    ForceQuit,
+    Open,
+    Remove,
+    Minimized,
 };
 void SetLanguage(std::string_view lang);
 const wchar_t* Tr(Text t);

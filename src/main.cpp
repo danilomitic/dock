@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <unknwn.h>  // before C++/WinRT, so it can implement classic COM interfaces
 #include <shellapi.h>
 #include <winrt/base.h>
 
@@ -28,6 +29,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     winrt::init_apartment(winrt::apartment_type::single_threaded);
+    const bool ole = SUCCEEDED(OleInitialize(nullptr));  // drag & drop of files
     int code = 0;
     {
         dx::Dock dock;
@@ -43,6 +45,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
         }
     }
+    if (ole) OleUninitialize();
     if (mutex) {
         ReleaseMutex(mutex);
         CloseHandle(mutex);

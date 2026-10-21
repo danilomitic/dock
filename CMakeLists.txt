@@ -29,7 +29,11 @@ add_executable(DockX WIN32
   src/shell/apps.cpp
   src/shell/icons.cpp
   src/shell/screen.cpp
+  src/shell/droptarget.cpp
   src/ui/dock.cpp
+  src/ui/popup.cpp
+  src/ui/menu.cpp
+  src/ui/expose.cpp
   src/app.manifest)
 target_link_libraries(DockX PRIVATE dockcore
   d3d11 dxgi d2d1 dwrite dxguid windowscodecs dwmapi shlwapi shell32 ole32 oleaut32

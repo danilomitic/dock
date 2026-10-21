@@ -11,9 +11,11 @@
 #include "core/config.h"
 #include "render/graphics.h"
 #include "shell/apps.h"
+#include "shell/droptarget.h"
 #include "shell/icons.h"
 #include "shell/screen.h"
 #include "ui/layout.h"
+#include "ui/popup.h"
 
 namespace dx {
 
@@ -51,7 +53,7 @@ private:
 struct DockItem {
     int id = 0;
     bool pinned = false;
-    std::wstring path;   // launch target (.exe / .lnk), empty for Store apps
+    std::wstring path;   // launch target (.exe / .lnk / folder), empty for Store apps
     std::wstring aumid;
     std::wstring matchExe;    // lower-case exe path used to match windows
     std::wstring matchAumid;  // lower-case AUMID used to match windows
@@ -62,6 +64,8 @@ struct DockItem {
     bool removing = false;
     Spring presence;
     Spring dot;
+    Spring shiftU;  // smooth moves after a reorder or a drop (offset from the layout)
+    Spring shiftV;
 
     // Bounce
     bool bouncing = false;
@@ -120,6 +124,7 @@ private:
     void Rebuild(bool forceBar);
     void CreateEdgeTrigger(HINSTANCE instance);
     void PlaceEdgeTrigger();
+    void RegisterDropTargets();
 
     // Items
     void LoadPinned();
@@ -132,17 +137,46 @@ private:
     void SavePinned();
     DockItem* FindItem(int id);
     int IndexOf(int id) const;
+    void Reorder(int from, int to);
+    void PinAt(const std::wstring& path, double u);
 
     // Interaction
     void OnMouseMove(int x, int y);
     void OnMouseLeave();
+    void RefreshHover();
     void OnLeftDown();
     void OnLeftUp();
-    void OnRightUp(int x, int y);
+    void OnRightUp();
+    void OnHoldTimer();
     void Activate(DockItem& it);
     void StartBounce(DockItem& it, bool attention);
-    void ShowContextMenu(DockItem* it, POINT screen);
     int HitTest(double u) const;
+    [[nodiscard]] bool Dark() const { return cfg_.theme != "light"; }
+
+    // Menus and App Exposé
+    void BeforePopup();
+    void AfterPopup();
+    void ShowItemMenu(int itemId);
+    void ShowDockMenu();
+    void ShowExpose(int itemId);
+    POINT ItemAnchor(const DockItem& it) const;
+    RECT ItemScreenRect(const DockItem& it) const;
+
+    // Dragging icons
+    void EnsureGhost();
+    void BeginDrag();
+    void DragMove();
+    void EndDrag();
+    void PlaceGhost();
+    void StartPoof();
+    void UpdatePoof(double t);
+
+    // Files dropped from Explorer
+    DWORD DropOver(POINT screen);
+    void DropLeave();
+    DWORD DropFiles(const std::vector<std::wstring>& files, POINT screen);
+    void SetDropHighlight(int itemId);
+    bool CanPin(const std::vector<std::wstring>& files) const;
 
     // Hiding
     [[nodiscard]] bool AutoHideActive() const;
@@ -156,7 +190,9 @@ private:
     void StartAnimating();
     void Tick();
     bool StepAnimations(double dt);
+    LayoutResult ComputeCurrentLayout() const;
     void ApplyLayout();
+    wuc::CompositionSurfaceBrush MakeBubble(const std::wstring& text, float& width) const;
     void UpdateLabel();
     void UpdateRegion();
     [[nodiscard]] WinRect Map(double u, double v, double du, double dv) const;
@@ -191,15 +227,35 @@ private:
     bool menuOpen_ = false;
     bool fullscreen_ = false;
     bool showPending_ = false;
-    double mouseU_ = 0, mouseV_ = 0;
+    int mouseX_ = 0, mouseY_ = 0;      // client pixels
+    double mouseU_ = 0, mouseV_ = 0;   // dock space
     int hoverId_ = 0;
     int pressedId_ = 0;
+    int pressX_ = 0, pressY_ = 0;
     Spring magnify_;
     Spring hide_;  // 0 = shown, 1 = hidden off the edge
     LayoutResult layout_;
     double shelfLeft_ = 0, shelfRight_ = 0;
     RECT region_{};
     bool regionEmpty_ = false;
+
+    // Icon drag
+    bool dragging_ = false;
+    bool dragOutside_ = false;
+    double grabX_ = 0, grabY_ = 0;  // cursor offset inside the dragged icon
+    double dragSize_ = 0;
+    int ghostSize_ = 0;
+    GlassPopup ghost_;
+    wuc::SpriteVisual ghostIcon_{nullptr};
+    wuc::SpriteVisual ghostLabel_{nullptr};
+    std::vector<wuc::SpriteVisual> puffs_;
+    double poofTime_ = -1;
+
+    // File drop
+    winrt::com_ptr<DropTarget> dropTarget_;
+    winrt::com_ptr<DropTarget> edgeDropTarget_;
+    std::vector<std::wstring> dropFiles_;
+    int dropHighlightId_ = 0;
 
     // Visual tree
     wuc::SpriteVisual shadow_{nullptr};

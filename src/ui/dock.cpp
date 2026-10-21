@@ -1,7 +1,6 @@
 #include "ui/dock.h"
 
 #include <d2d1_1helper.h>
-#include <d2d1effects.h>
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
@@ -9,9 +8,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
+#include <unordered_map>
 
 #include "core/log.h"
 #include "core/strings.h"
+#include "ui/expose.h"
+#include "ui/menu.h"
 
 namespace dx {
 namespace {
@@ -22,16 +25,35 @@ constexpr UINT_PTR kTimerRescan = 1;
 constexpr UINT_PTR kTimerRescanLate = 2;
 constexpr UINT_PTR kTimerShow = 3;
 constexpr UINT_PTR kTimerHide = 4;
+constexpr UINT_PTR kTimerHold = 5;
 
 constexpr double kLaunchBouncePeriod = 0.62;
 constexpr double kAttentionBouncePeriod = 0.5;
 constexpr double kMaxLaunchBounce = 10.0;
+constexpr double kPoofDuration = 0.45;
+constexpr int kPuffs = 7;
+constexpr UINT kHoldMs = 500;
+
+// Menu commands
+enum : UINT {
+    kCmdKeep = 1, kCmdShow, kCmdClose, kCmdForceQuit, kCmdHide, kCmdOpen, kCmdExpose,
+    kCmdMagnify, kCmdDark, kCmdAutoHide, kCmdPosLeft, kCmdPosBottom, kCmdPosRight, kCmdHideTaskbar, kCmdQuitDock,
+    kCmdWindow = 100
+};
 
 float F(double v) { return static_cast<float>(v); }
 
 bool EndsWith(const std::wstring& s, const wchar_t* suffix) { return Lower(s).ends_with(suffix); }
 
 UINT Ms(double seconds) { return static_cast<UINT>(std::max(1.0, seconds * 1000)); }
+
+MenuItem Item(const wchar_t* text, UINT id, bool checked = false) {
+    MenuItem m;
+    m.text = text;
+    m.id = id;
+    m.checked = checked;
+    return m;
+}
 
 }  // namespace
 
@@ -84,19 +106,19 @@ Dock::~Dock() {
     Log(L"shutdown: start");
     if (cloakHook_) UnhookWinEvent(cloakHook_);
     if (foregroundHook_) UnhookWinEvent(foregroundHook_);
+    if (hwnd_) RevokeDragDrop(hwnd_);
+    if (edgeWnd_) RevokeDragDrop(edgeWnd_);
     icons_.Stop();
-    Log(L"shutdown: icons stopped");
     clock_.Shutdown();
-    Log(L"shutdown: clock stopped");
     RestoreTaskbar();
-    Log(L"shutdown: taskbar restored");
     appBar_.Remove();
-    Log(L"shutdown: appbar removed");
+    ghost_.Destroy();
     if (edgeWnd_) DestroyWindow(edgeWnd_);
     if (hwnd_) {
         DeregisterShellHookWindow(hwnd_);
         DestroyWindow(hwnd_);
     }
+    Log(L"shutdown: done");
     g_dock = nullptr;
 }
 
@@ -164,6 +186,7 @@ bool Dock::Create(HINSTANCE instance) {
                                  WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     foregroundHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, WinEventProc, 0, 0,
                                       WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    RegisterDropTargets();
     StartWatchdog(hwnd_);
     Log(L"DockX started: %d items, scale %.2f, edge %S", static_cast<int>(items_.size()), m_.scale, cfg_.position.c_str());
     return true;
@@ -179,6 +202,32 @@ void Dock::CreateEdgeTrigger(HINSTANCE instance) {
     // Invisible (no content) but it still receives the mouse: the auto-hide trigger.
     edgeWnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                                wc.lpszClassName, L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance, nullptr);
+}
+
+void Dock::RegisterDropTargets() {
+    DropTarget::Callbacks cb;
+    cb.enter = [this](const std::vector<std::wstring>& files, POINT p) {
+        dropFiles_ = files;
+        return DropOver(p);
+    };
+    cb.over = [this](POINT p) { return DropOver(p); };
+    cb.leave = [this] { DropLeave(); };
+    cb.drop = [this](const std::vector<std::wstring>& files, POINT p) { return DropFiles(files, p); };
+    dropTarget_ = winrt::make_self<DropTarget>(hwnd_, cb);
+    if (FAILED(RegisterDragDrop(hwnd_, dropTarget_.get()))) Log(L"RegisterDragDrop failed");
+
+    // Dragging a file to the screen edge reveals an auto-hidden dock.
+    DropTarget::Callbacks edge;
+    edge.enter = [this](const std::vector<std::wstring>&, POINT) {
+        OnEdgeHover();
+        return static_cast<DWORD>(DROPEFFECT_NONE);
+    };
+    edge.over = [this](POINT) {
+        OnEdgeHover();
+        return static_cast<DWORD>(DROPEFFECT_NONE);
+    };
+    edgeDropTarget_ = winrt::make_self<DropTarget>(edgeWnd_, edge);
+    RegisterDragDrop(edgeWnd_, edgeDropTarget_.get());
 }
 
 void Dock::ComputeMetrics() {
@@ -224,31 +273,25 @@ void Dock::PositionWindow(bool force) {
     const int depth = static_cast<int>(m_.depth);
     int x = 0, y = 0, w = 0, h = 0;
     switch (edge_) {
-        case Edge::Left: {
-            const int outer = barOk ? bar.left : work.left;
-            x = outer;
+        case Edge::Left:
+            x = barOk ? bar.left : work.left;
             y = work.top;
             w = depth;
             h = work.bottom - work.top;
             break;
-        }
-        case Edge::Right: {
-            const int outer = barOk ? bar.right : work.right;
-            x = outer - depth;
+        case Edge::Right:
+            x = (barOk ? bar.right : work.right) - depth;
             y = work.top;
             w = depth;
             h = work.bottom - work.top;
             break;
-        }
         case Edge::Bottom:
-        default: {
-            const int outer = barOk ? bar.bottom : work.bottom;
+        default:
             x = work.left;
-            y = outer - depth;
+            y = (barOk ? bar.bottom : work.bottom) - depth;
             w = work.right - work.left;
             h = depth;
             break;
-        }
     }
     m_.winX = x;
     m_.winY = y;
@@ -294,55 +337,22 @@ void Dock::BuildChrome() {
     root.Children().InsertAtTop(label_);
 }
 
-// A blurred rounded rectangle drawn once, stretched with a nine-grid brush.
 void Dock::BuildShadow() {
     if (!cfg_.shadow) {
         shadow_.IsVisible(false);
         shadowExtent_ = 0;
         return;
     }
-    const float sigma = F(5 * m_.scale);
-    const float ext = 3 * sigma;
-    const float rad = F(m_.radius);
-    const float inset = ext + rad;
-    const int n = static_cast<int>(std::ceil(2 * inset + 4));
-    const auto surface = gfx_.CreateSurface(n, n);
-    gfx_.Draw(surface, [&](ID2D1DeviceContext* dc) {
-        winrt::com_ptr<ID2D1Bitmap1> shape;
-        const auto props = D2D1::BitmapProperties1(
-            D2D1_BITMAP_OPTIONS_TARGET, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        if (FAILED(dc->CreateBitmap(D2D1::SizeU(n, n), nullptr, 0, props, shape.put()))) return;
-        winrt::com_ptr<ID2D1Image> target;
-        dc->GetTarget(target.put());
-        D2D1_MATRIX_3X2_F transform;
-        dc->GetTransform(&transform);
-        dc->SetTarget(shape.get());
-        dc->SetTransform(D2D1::Matrix3x2F::Identity());
-        dc->Clear(D2D1::ColorF(0, 0, 0, 0));
-        winrt::com_ptr<ID2D1SolidColorBrush> black;
-        dc->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), black.put());
-        dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(ext, ext, n - ext, n - ext), rad, rad), black.get());
-        dc->SetTarget(target.get());
-        dc->SetTransform(transform);
-        winrt::com_ptr<ID2D1Effect> fx;
-        if (FAILED(dc->CreateEffect(CLSID_D2D1Shadow, fx.put()))) return;
-        fx->SetInput(0, shape.get());
-        fx->SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, sigma);
-        dc->DrawImage(fx.get());
-    });
-    const auto& c = gfx_.Comp();
-    const auto nine = c.CreateNineGridBrush();
-    nine.Source(c.CreateSurfaceBrush(surface));
-    nine.SetInsets(inset);
-    shadow_.Brush(nine);
+    const ShadowBrush sb = gfx_.CreateShadow(F(m_.radius), F(5 * m_.scale));
+    shadow_.Brush(sb.brush);
     shadow_.Opacity(F(cfg_.shadowOpacity));
     shadow_.IsVisible(true);
-    shadowExtent_ = ext;
+    shadowExtent_ = sb.extent;
 }
 
 void Dock::ApplyTheme() {
     const auto& c = gfx_.Comp();
-    const bool dark = cfg_.theme != "light";
+    const bool dark = Dark();
     const uint32_t tint = cfg_.glassTint.value_or(dark ? 0x282828u : 0xF4F4F4u);
     const double opacity = cfg_.blur ? cfg_.glassOpacity : std::max(0.88, cfg_.glassOpacity);
     tint_.Brush(c.CreateColorBrush(Rgba(static_cast<uint8_t>(tint >> 16), static_cast<uint8_t>(tint >> 8),
@@ -377,6 +387,7 @@ void Dock::Rebuild(bool forceBar) {
     ApplyTheme();
     for (auto& it : items_) RequestIcon(*it);
     if (IsWindowVisible(edgeWnd_)) PlaceEdgeTrigger();
+    ghostSize_ = 0;  // re-created at the new size on the next drag
     ApplyLayout();
     UpdateRegion();
 }
@@ -415,6 +426,8 @@ DockItem& Dock::AddItem(bool pinned, std::wstring path, std::wstring aumid, bool
     it.presence.target = 1;
     it.presence.value = animate ? 0 : 1;
     it.dot.response = 0.25;
+    it.shiftU.response = 0.3;
+    it.shiftV.response = 0.3;
 
     CreateItemVisuals(it);
     items_.push_back(std::move(item));
@@ -441,8 +454,7 @@ void Dock::CreateItemVisuals(DockItem& it) {
     ellipse.Center({d / 2, d / 2});
     ellipse.Radius({d / 2, d / 2});
     it.dotVisual.Clip(c.CreateGeometricClip(ellipse));
-    const bool dark = cfg_.theme != "light";
-    it.dotVisual.Brush(c.CreateColorBrush(dark ? Rgba(255, 255, 255, 210) : Rgba(0, 0, 0, 170)));
+    it.dotVisual.Brush(c.CreateColorBrush(Dark() ? Rgba(255, 255, 255, 210) : Rgba(0, 0, 0, 170)));
     it.dotVisual.Opacity(0);
     dots_.Children().InsertAtTop(it.dotVisual);
 }
@@ -490,6 +502,42 @@ int Dock::IndexOf(int id) const {
     return -1;
 }
 
+// Moves an item in the list; the others glide to their new places from where they are now.
+void Dock::Reorder(int from, int to) {
+    if (from == to || from < 0 || to < 0) return;
+    std::unordered_map<int, double> before;
+    for (const auto& it : items_) before[it->id] = it->cu;
+    auto moved = std::move(items_[from]);
+    items_.erase(items_.begin() + from);
+    items_.insert(items_.begin() + to, std::move(moved));
+    const LayoutResult after = ComputeCurrentLayout();
+    for (size_t i = 0; i < items_.size() && i < after.center.size(); ++i) {
+        DockItem& it = *items_[i];
+        if (dragging_ && it.id == pressedId_) continue;
+        it.shiftU.value = before[it.id] - after.center[i];
+        it.shiftU.target = 0;
+    }
+    StartAnimating();
+}
+
+void Dock::PinAt(const std::wstring& path, double u) {
+    for (const auto& it : items_)
+        if (it->pinned && Lower(it->path) == Lower(path)) return;  // already in the dock
+    int index = static_cast<int>(items_.size());
+    for (size_t i = 0; i < layout_.center.size() && i < items_.size(); ++i)
+        if (u < layout_.center[i]) {
+            index = static_cast<int>(i);
+            break;
+        }
+    AddItem(true, path, L"", true);
+    auto added = std::move(items_.back());
+    items_.pop_back();
+    items_.insert(items_.begin() + index, std::move(added));
+    SavePinned();
+    ScheduleRescan(false);
+    StartAnimating();
+}
+
 void Dock::Rescan() {
     const auto windows = EnumAppWindows(GetCurrentProcessId());
     for (auto& it : items_) it->windows.clear();
@@ -515,6 +563,7 @@ void Dock::Rescan() {
         const bool running = !it->windows.empty();
         it->dot.target = running ? 1 : 0;
         if (!initialized_) it->dot.Snap();
+        if (dragging_ && it->id == pressedId_) continue;  // the drag decides about this one
         if (running) {
             if (it->removing) {
                 it->removing = false;
@@ -538,7 +587,7 @@ void Dock::ScheduleRescan(bool alsoLate) {
 void Dock::SavePinned() {
     cfg_.pinned.clear();
     for (const auto& it : items_)
-        if (it->pinned) cfg_.pinned.push_back({it->path, it->aumid});
+        if (it->pinned && !it->removing) cfg_.pinned.push_back({it->path, it->aumid});
     cfg_.pinnedInitialized = true;
     SaveConfig(cfg_);
 }
@@ -553,26 +602,41 @@ int Dock::HitTest(double u) const {
 }
 
 void Dock::OnMouseMove(int x, int y) {
+    mouseX_ = x;
+    mouseY_ = y;
     ToDock(edge_, x, y, m_.winW, m_.winH, mouseU_, mouseV_);
-    const double u = mouseU_, v = mouseV_;
     if (!trackingLeave_) {
         TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, hwnd_, 0};
         TrackMouseEvent(&t);
         trackingLeave_ = true;
     }
+    if (dragging_) {
+        DragMove();
+        return;
+    }
+    if (pressedId_ && std::hypot(x - pressX_, y - pressY_) > 6 * m_.scale) {
+        BeginDrag();
+        DragMove();
+        return;
+    }
+
+    const double u = mouseU_, v = mouseV_;
+    ApplyLayout();  // hit-test against the layout for this cursor position
     const int idx = HitTest(u);
     if (!hovering_) {
         const bool inShelf = hide_.target == 0 && u >= shelfLeft_ && u <= shelfRight_ && v >= 0 && v <= m_.margin + m_.shelfH;
         if (!inShelf) return;
+        Log(L"enter u=%.0f v=%.0f", u, v);
         hovering_ = true;
         KillTimer(hwnd_, kTimerHide);
         magnify_.target = cfg_.magnification ? 1 : 0;
         UpdateRegion();
-    } else {
+    } else if (!pressedId_) {
         // Stay "inside" up to the far side of the (magnified) icon under the cursor.
         const double reach = std::max(idx >= 0 ? items_[idx]->reach : 0.0, m_.margin + m_.shelfH);
         const bool inside = u >= shelfLeft_ - 2 && u <= shelfRight_ + 2 && v <= reach + 2 * m_.scale;
         if (!inside) {
+            Log(L"leave (outside) u=%.0f v=%.0f shelf=%.0f..%.0f reach=%.0f", u, v, shelfLeft_, shelfRight_, reach);
             OnMouseLeave();
             return;
         }
@@ -587,25 +651,46 @@ void Dock::OnMouseLeave() {
     hovering_ = false;
     hoverId_ = 0;
     magnify_.target = 0;
-    if (pressedId_) {
+    if (pressedId_ && !dragging_) {
         if (DockItem* it = FindItem(pressedId_)) it->dim.Opacity(0);
         pressedId_ = 0;
+        KillTimer(hwnd_, kTimerHold);
         ReleaseCapture();
     }
-    if (AutoHideActive()) SetTimer(hwnd_, kTimerHide, Ms(cfg_.hideDelay), nullptr);
+    if (AutoHideActive() && !menuOpen_) SetTimer(hwnd_, kTimerHide, Ms(cfg_.hideDelay), nullptr);
     UpdateLabel();
     StartAnimating();
 }
 
+// Clicks use the cursor position right now, not the last mouse-move we processed.
+void Dock::RefreshHover() {
+    POINT p{};
+    GetCursorPos(&p);
+    ScreenToClient(hwnd_, &p);
+    OnMouseMove(p.x, p.y);
+    ApplyLayout();
+    const int idx = hovering_ ? HitTest(mouseU_) : -1;
+    hoverId_ = idx >= 0 ? items_[idx]->id : 0;
+}
+
 void Dock::OnLeftDown() {
-    if (!hoverId_) return;
+    RefreshHover();
+    if (!hoverId_ || dragging_) return;
     pressedId_ = hoverId_;
+    pressX_ = mouseX_;
+    pressY_ = mouseY_;
     if (DockItem* it = FindItem(pressedId_)) it->dim.Opacity(0.3f);
     SetCapture(hwnd_);
+    SetTimer(hwnd_, kTimerHold, kHoldMs, nullptr);
     UpdateLabel();
 }
 
 void Dock::OnLeftUp() {
+    KillTimer(hwnd_, kTimerHold);
+    if (dragging_) {
+        EndDrag();
+        return;
+    }
     if (!pressedId_) return;
     const int id = pressedId_;
     pressedId_ = 0;
@@ -617,11 +702,32 @@ void Dock::OnLeftUp() {
     UpdateLabel();
 }
 
-void Dock::OnRightUp(int x, int y) {
+void Dock::OnRightUp() {
+    if (dragging_) return;
+    RefreshHover();
     if (!hovering_) return;
-    POINT pt{x, y};
-    ClientToScreen(hwnd_, &pt);
-    ShowContextMenu(hoverId_ ? FindItem(hoverId_) : nullptr, pt);
+    // The strip under the icons (where the dots are) counts as the dock itself.
+    const bool onIcon = hoverId_ && mouseV_ >= m_.iconNear - 2 * m_.scale;
+    try {
+        if (onIcon) ShowItemMenu(hoverId_);
+        else ShowDockMenu();
+    } catch (const winrt::hresult_error& e) {
+        menuOpen_ = false;
+        Log(L"menu failed: 0x%08X %s", static_cast<unsigned>(e.code().value), e.message().c_str());
+    }
+}
+
+// Click and hold: App Exposé for a running app, the menu otherwise.
+void Dock::OnHoldTimer() {
+    if (!pressedId_ || dragging_) return;
+    const int id = pressedId_;
+    pressedId_ = 0;
+    ReleaseCapture();
+    DockItem* it = FindItem(id);
+    if (!it) return;
+    it->dim.Opacity(0);
+    if (!it->windows.empty()) ShowExpose(id);
+    else ShowItemMenu(id);
 }
 
 void Dock::Activate(DockItem& it) {
@@ -647,53 +753,109 @@ void Dock::StartBounce(DockItem& it, bool attention) {
     StartAnimating();
 }
 
-void Dock::ShowContextMenu(DockItem* it, POINT pt) {
-    enum : UINT {
-        kKeep = 1, kShow, kClose, kMagnify, kDark, kAutoHide, kPosLeft, kPosBottom, kPosRight, kHideTaskbar, kQuitDock,
-        kWindow = 100
-    };
-    HMENU menu = CreatePopupMenu();
-    const int id = it ? it->id : 0;
-    if (it) {
-        for (size_t i = 0; i < it->windows.size() && i < 20; ++i) {
-            std::wstring title = WindowTitle(it->windows[i]);
-            if (title.empty()) title = it->name;
-            AppendMenuW(menu, MF_STRING, kWindow + i, title.c_str());
-        }
-        if (!it->windows.empty()) AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (it->pinned ? MF_CHECKED : 0), kKeep, Tr(Text::KeepInDock));
-        if (!it->path.empty()) AppendMenuW(menu, MF_STRING, kShow, Tr(Text::ShowInExplorer));
-        if (!it->windows.empty()) {
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(menu, MF_STRING, kClose, Tr(Text::Quit));
-        }
+// ---------------------------------------------------------------- Menus & App Exposé
+
+POINT Dock::ItemAnchor(const DockItem& it) const {
+    const WinRect r = Map(it.cu, it.reach + 6 * m_.scale, 0, 0);
+    return {m_.winX + static_cast<LONG>(r.x), m_.winY + static_cast<LONG>(r.y)};
+}
+
+RECT Dock::ItemScreenRect(const DockItem& it) const {
+    const WinRect r = Map(it.cu - it.size / 2, it.reach - it.size, it.size, it.size);
+    return {m_.winX + static_cast<LONG>(r.x), m_.winY + static_cast<LONG>(r.y), m_.winX + static_cast<LONG>(r.x + r.w),
+            m_.winY + static_cast<LONG>(r.y + r.h)};
+}
+
+void Dock::BeforePopup() {
+    menuOpen_ = true;
+    KillTimer(hwnd_, kTimerHide);
+    OnMouseLeave();
+}
+
+void Dock::AfterPopup() {
+    menuOpen_ = false;
+    if (AutoHideActive() && !hovering_) SetTimer(hwnd_, kTimerHide, Ms(cfg_.hideDelay), nullptr);
+}
+
+void Dock::ShowItemMenu(int itemId) {
+    DockItem* it = FindItem(itemId);
+    if (!it) return;
+    const bool shift = GetKeyState(VK_SHIFT) < 0;
+    const MenuSide side = edge_ == Edge::Left ? MenuSide::Right : edge_ == Edge::Right ? MenuSide::Left : MenuSide::Above;
+
+    std::vector<MenuItem> items;
+    std::vector<std::wstring> titles;
+    for (size_t i = 0; i < it->windows.size() && i < 20; ++i) {
+        std::wstring title = WindowTitle(it->windows[i]);
+        titles.push_back(title.empty() ? it->name : title);
+        items.push_back(Item(titles.back().c_str(), kCmdWindow + static_cast<UINT>(i)));
+    }
+    if (!items.empty()) items.push_back(MenuItem::Separator());
+    MenuItem options = Item(Tr(Text::Options), 0);
+    options.sub.push_back(Item(Tr(Text::KeepInDock), kCmdKeep, it->pinned));
+    if (!it->path.empty()) options.sub.push_back(Item(Tr(Text::ShowInExplorer), kCmdShow));
+    items.push_back(options);
+    if (!it->windows.empty()) items.push_back(Item(Tr(Text::ShowAllWindows), kCmdExpose));
+    items.push_back(MenuItem::Separator());
+    if (!it->windows.empty()) {
+        items.push_back(Item(Tr(Text::Hide), kCmdHide));
+        items.push_back(shift ? Item(Tr(Text::ForceQuit), kCmdForceQuit) : Item(Tr(Text::Quit), kCmdClose));
     } else {
-        AppendMenuW(menu, MF_STRING | (cfg_.autoHide ? MF_CHECKED : 0), kAutoHide, Tr(Text::AutoHide));
-        AppendMenuW(menu, MF_STRING | (cfg_.magnification ? MF_CHECKED : 0), kMagnify, Tr(Text::Magnification));
-        HMENU pos = CreatePopupMenu();
-        AppendMenuW(pos, MF_STRING | (edge_ == Edge::Left ? MF_CHECKED : 0), kPosLeft, Tr(Text::PositionLeft));
-        AppendMenuW(pos, MF_STRING | (edge_ == Edge::Bottom ? MF_CHECKED : 0), kPosBottom, Tr(Text::PositionBottom));
-        AppendMenuW(pos, MF_STRING | (edge_ == Edge::Right ? MF_CHECKED : 0), kPosRight, Tr(Text::PositionRight));
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pos), Tr(Text::Position));
-        AppendMenuW(menu, MF_STRING | (cfg_.hideTaskbar ? MF_CHECKED : 0), kHideTaskbar, Tr(Text::HideTaskbar));
-        AppendMenuW(menu, MF_STRING | (cfg_.theme != "light" ? MF_CHECKED : 0), kDark, Tr(Text::DarkTheme));
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kQuitDock, Tr(Text::QuitDock));
+        items.push_back(Item(Tr(Text::Open), kCmdOpen));
     }
 
-    UINT align = TPM_BOTTOMALIGN | TPM_CENTERALIGN;
-    if (edge_ == Edge::Left) align = TPM_LEFTALIGN | TPM_VCENTERALIGN;
-    if (edge_ == Edge::Right) align = TPM_RIGHTALIGN | TPM_VCENTERALIGN;
+    const POINT anchor = ItemAnchor(*it);
+    BeforePopup();
+    const UINT cmd = MacMenu::Run(gfx_, items, anchor, side, Dark(), m_.scale);
+    AfterPopup();
 
-    menuOpen_ = true;
-    SetForegroundWindow(hwnd_);
-    const UINT cmd = static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | align, pt.x, pt.y, hwnd_, nullptr));
-    PostMessageW(hwnd_, WM_NULL, 0, 0);
-    DestroyMenu(menu);  // also destroys the submenu
-    menuOpen_ = false;
-    OnMouseLeave();
+    it = FindItem(itemId);  // the item list may have changed while the menu was open
+    if (!it || !cmd) return;
+    switch (cmd) {
+        case kCmdKeep:
+            it->pinned = !it->pinned;
+            if (!it->pinned && it->windows.empty()) {
+                it->removing = true;
+                it->presence.target = 0;
+            }
+            SavePinned();
+            StartAnimating();
+            break;
+        case kCmdShow: ShowInExplorer(it->path); break;
+        case kCmdExpose: ShowExpose(itemId); break;
+        case kCmdHide: MinimizeWindows(it->windows); break;
+        case kCmdClose: CloseWindows(it->windows); break;
+        case kCmdForceQuit: ForceQuitWindows(it->windows); break;
+        case kCmdOpen: Activate(*it); break;
+        default:
+            if (cmd >= kCmdWindow && cmd - kCmdWindow < it->windows.size()) ActivateWindow(it->windows[cmd - kCmdWindow]);
+            break;
+    }
+}
 
-    it = id ? FindItem(id) : nullptr;  // the item list may have changed
+void Dock::ShowDockMenu() {
+    const MenuSide side = edge_ == Edge::Left ? MenuSide::Right : edge_ == Edge::Right ? MenuSide::Left : MenuSide::Above;
+    const WinRect r = Map(mouseU_, m_.margin + m_.shelfH + 6 * m_.scale, 0, 0);
+    const POINT anchor{m_.winX + static_cast<LONG>(r.x), m_.winY + static_cast<LONG>(r.y)};
+
+    std::vector<MenuItem> items;
+    items.push_back(Item(Tr(Text::AutoHide), kCmdAutoHide, cfg_.autoHide));
+    items.push_back(Item(Tr(Text::Magnification), kCmdMagnify, cfg_.magnification));
+    MenuItem pos = Item(Tr(Text::Position), 0);
+    pos.sub.push_back(Item(Tr(Text::PositionLeft), kCmdPosLeft, edge_ == Edge::Left));
+    pos.sub.push_back(Item(Tr(Text::PositionBottom), kCmdPosBottom, edge_ == Edge::Bottom));
+    pos.sub.push_back(Item(Tr(Text::PositionRight), kCmdPosRight, edge_ == Edge::Right));
+    items.push_back(pos);
+    items.push_back(MenuItem::Separator());
+    items.push_back(Item(Tr(Text::HideTaskbar), kCmdHideTaskbar, cfg_.hideTaskbar));
+    items.push_back(Item(Tr(Text::DarkTheme), kCmdDark, Dark()));
+    items.push_back(MenuItem::Separator());
+    items.push_back(Item(Tr(Text::QuitDock), kCmdQuitDock));
+
+    BeforePopup();
+    const UINT cmd = MacMenu::Run(gfx_, items, anchor, side, Dark(), m_.scale);
+    AfterPopup();
+
     auto setPosition = [this](const char* p) {
         if (cfg_.position == p) return;
         cfg_.position = p;
@@ -701,66 +863,290 @@ void Dock::ShowContextMenu(DockItem* it, POINT pt) {
         Rebuild(true);
     };
     switch (cmd) {
-        case 0: break;
-        case kKeep:
-            if (!it) break;
-            it->pinned = !it->pinned;
-            if (it->pinned) {
-                // Pinned apps come first: move it right after the last pinned one.
-                const int from = IndexOf(it->id);
-                int to = 0;
-                for (size_t i = 0; i < items_.size(); ++i)
-                    if (items_[i]->pinned && static_cast<int>(i) != from) to = static_cast<int>(i) + 1;
-                if (to > from) --to;
-                auto moved = std::move(items_[from]);
-                items_.erase(items_.begin() + from);
-                items_.insert(items_.begin() + to, std::move(moved));
-            } else if (it->windows.empty()) {
-                it->removing = true;
-                it->presence.target = 0;
-            }
-            SavePinned();
-            StartAnimating();
-            break;
-        case kShow:
-            if (it) ShowInExplorer(it->path);
-            break;
-        case kClose:
-            if (it)
-                for (HWND w : it->windows) PostMessageW(w, WM_CLOSE, 0, 0);
-            break;
-        case kMagnify:
+        case kCmdMagnify:
             cfg_.magnification = !cfg_.magnification;
             SaveConfig(cfg_);
             Rebuild(false);
             break;
-        case kDark:
-            cfg_.theme = cfg_.theme == "light" ? "dark" : "light";
+        case kCmdDark:
+            cfg_.theme = Dark() ? "light" : "dark";
             SaveConfig(cfg_);
             ApplyTheme();
             break;
-        case kAutoHide:
+        case kCmdAutoHide:
             cfg_.autoHide = !cfg_.autoHide;
             SaveConfig(cfg_);
             PositionWindow(true);  // reserve or release screen space
             SetHidden(AutoHideActive());
             ApplyLayout();
             break;
-        case kPosLeft: setPosition("left"); break;
-        case kPosBottom: setPosition("bottom"); break;
-        case kPosRight: setPosition("right"); break;
-        case kHideTaskbar:
+        case kCmdPosLeft: setPosition("left"); break;
+        case kCmdPosBottom: setPosition("bottom"); break;
+        case kCmdPosRight: setPosition("right"); break;
+        case kCmdHideTaskbar:
             cfg_.hideTaskbar = !cfg_.hideTaskbar;
             SaveConfig(cfg_);
             ApplyTaskbarSetting();
             break;
-        case kQuitDock:
+        case kCmdQuitDock:
             DestroyWindow(hwnd_);
             break;
-        default:
-            if (it && cmd >= kWindow && cmd - kWindow < it->windows.size()) ActivateWindow(it->windows[cmd - kWindow]);
-            break;
+        default: break;
     }
+}
+
+void Dock::ShowExpose(int itemId) {
+    DockItem* it = FindItem(itemId);
+    if (!it || it->windows.empty()) return;
+    const std::vector<HWND> windows = it->windows;
+    const RECT icon = ItemScreenRect(*it);
+    BeforePopup();
+    const HWND chosen = Expose::Run(gfx_, windows, icon, edge_, Dark(), m_.scale);
+    AfterPopup();
+    if (chosen && IsWindow(chosen)) ActivateWindow(chosen);
+}
+
+// ---------------------------------------------------------------- Dragging icons
+
+void Dock::EnsureGhost() {
+    const int size = static_cast<int>(std::ceil(std::max(2.3 * m_.maxIcon, m_.maxIcon + 2 * (m_.labelGap + m_.labelH)) + 8 * m_.scale));
+    if (ghost_.Hwnd() && size == ghostSize_) return;
+    ghost_.Destroy();
+    puffs_.clear();
+    ghostSize_ = size;
+    ghost_.Create(&gfx_, false, false, nullptr);
+    ghost_.Style(Dark(), 0, F(m_.scale));
+    ghost_.Place(-10000, -10000, ghostSize_, ghostSize_);
+
+    // The poof cloud: soft white puffs drawn once.
+    const auto& c = gfx_.Comp();
+    const int puffPx = static_cast<int>(std::ceil(64 * m_.scale));
+    const auto surface = gfx_.CreateSurface(puffPx, puffPx);
+    gfx_.Draw(surface, [&](ID2D1DeviceContext* dc) {
+        const D2D1_GRADIENT_STOP stops[] = {{0.0f, D2D1::ColorF(1, 1, 1, 0.95f)},
+                                            {0.55f, D2D1::ColorF(0.93f, 0.93f, 0.95f, 0.75f)},
+                                            {1.0f, D2D1::ColorF(0.9f, 0.9f, 0.92f, 0.0f)}};
+        winrt::com_ptr<ID2D1GradientStopCollection> collection;
+        dc->CreateGradientStopCollection(stops, 3, collection.put());
+        winrt::com_ptr<ID2D1RadialGradientBrush> brush;
+        const float r = puffPx / 2.0f;
+        dc->CreateRadialGradientBrush(D2D1::RadialGradientBrushProperties(D2D1::Point2F(r, r), {}, r, r), collection.get(),
+                                      brush.put());
+        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r, r), r, r), brush.get());
+    });
+    const auto puffBrush = c.CreateSurfaceBrush(surface);
+    for (int i = 0; i <= kPuffs; ++i) {
+        auto p = c.CreateSpriteVisual();
+        p.Brush(puffBrush);
+        p.IsVisible(false);
+        ghost_.Content().Children().InsertAtTop(p);
+        puffs_.push_back(p);
+    }
+    ghostIcon_ = c.CreateSpriteVisual();
+    ghost_.Content().Children().InsertAtTop(ghostIcon_);
+    ghostLabel_ = c.CreateSpriteVisual();
+    ghostLabel_.IsVisible(false);
+    ghost_.Content().Children().InsertAtTop(ghostLabel_);
+}
+
+void Dock::BeginDrag() {
+    DockItem* it = FindItem(pressedId_);
+    if (!it) return;
+    KillTimer(hwnd_, kTimerHold);
+    dragging_ = true;
+    dragOutside_ = false;
+    hovering_ = true;
+    it->dim.Opacity(0);
+
+    // Keep the cursor at the same spot inside the icon (direct manipulation).
+    const WinRect ir = Map(it->cu - it->size / 2, m_.iconNear + it->bounceOffset + it->shiftV.value, it->size, it->size);
+    grabX_ = pressX_ - ir.x;
+    grabY_ = pressY_ - ir.y;
+    dragSize_ = it->size;
+
+    EnsureGhost();
+    poofTime_ = -1;
+    for (auto& p : puffs_) p.IsVisible(false);
+    const float g = static_cast<float>(ghostSize_), s = F(dragSize_);
+    ghostIcon_.Brush(it->icon.Brush());
+    ghostIcon_.Size({s, s});
+    ghostIcon_.Offset({(g - s) / 2, (g - s) / 2, 0});
+    ghostIcon_.Opacity(1);
+    ghostIcon_.IsVisible(true);
+    float lw = 0;
+    ghostLabel_.Brush(MakeBubble(Tr(Text::Remove), lw));
+    ghostLabel_.Size({lw, F(m_.labelH)});
+    ghostLabel_.Offset({(g - lw) / 2, (g - s) / 2 - F(m_.labelGap + m_.labelH), 0});
+    ghostLabel_.IsVisible(false);
+    PlaceGhost();
+    ghost_.Show(false);
+    UpdateLabel();
+    UpdateRegion();
+}
+
+void Dock::PlaceGhost() {
+    POINT p{static_cast<LONG>(mouseX_ - grabX_), static_cast<LONG>(mouseY_ - grabY_)};  // icon top-left, client
+    ClientToScreen(hwnd_, &p);
+    const int off = static_cast<int>((ghostSize_ - dragSize_) / 2);
+    ghost_.MoveTo(p.x - off, p.y - off);
+}
+
+void Dock::DragMove() {
+    DockItem* it = FindItem(pressedId_);
+    if (!it) return;
+    PlaceGhost();
+    const double u = mouseU_, v = mouseV_;
+    const bool outside = v > m_.margin + m_.shelfH + 0.75 * m_.icon || v < -0.5 * m_.icon ||
+                         u < shelfLeft_ - m_.icon || u > shelfRight_ + m_.icon;
+    if (outside != dragOutside_) {
+        dragOutside_ = outside;
+        magnify_.target = (!outside && cfg_.magnification) ? 1 : 0;
+        // Outside: the gap closes (unless the app is running, then it stays in the dock anyway).
+        it->presence.target = (outside && it->windows.empty()) ? 0 : 1;
+        ghostLabel_.IsVisible(outside);
+    }
+    if (!outside) {
+        const int target = HitTest(u);
+        const int from = IndexOf(it->id);
+        if (target >= 0 && target != from) Reorder(from, target);
+    }
+    ApplyLayout();
+    StartAnimating();
+}
+
+void Dock::EndDrag() {
+    DockItem* it = FindItem(pressedId_);
+    dragging_ = false;
+    pressedId_ = 0;
+    ReleaseCapture();
+    if (!it) {
+        ghost_.Hide();
+        return;
+    }
+    // Where the dragged icon is now, in dock space.
+    double gu = 0, gv = 0;
+    ToDock(edge_, mouseX_ - grabX_ + dragSize_ / 2, mouseY_ - grabY_ + dragSize_ / 2, m_.winW, m_.winH, gu, gv);
+    const double ghostNear = gv - dragSize_ / 2;
+    const int idx = IndexOf(it->id);
+
+    auto flyBack = [&] {
+        // The icon glides from where it was dropped into its slot.
+        if (idx >= 0 && idx < static_cast<int>(layout_.center.size())) {
+            it->shiftU.value = gu - layout_.center[idx];
+            it->shiftV.value = ghostNear - m_.iconNear;
+        }
+        ghost_.Hide();
+    };
+
+    if (dragOutside_) {
+        it->pinned = false;
+        if (it->windows.empty()) {
+            it->removing = true;
+            it->presence.target = 0;
+            StartPoof();
+        } else {
+            it->presence.target = 1;
+            flyBack();
+        }
+    } else {
+        it->pinned = true;  // dragging an app into the dock keeps it there
+        flyBack();
+    }
+    dragOutside_ = false;
+    SavePinned();
+    magnify_.target = cfg_.magnification ? 1 : 0;
+    OnMouseMove(mouseX_, mouseY_);  // decides whether we are still hovering
+    StartAnimating();
+}
+
+void Dock::StartPoof() {
+    poofTime_ = 0;
+    ghostIcon_.IsVisible(false);
+    ghostLabel_.IsVisible(false);
+    for (auto& p : puffs_) p.IsVisible(true);
+    UpdatePoof(0);
+    StartAnimating();
+}
+
+// The macOS "poof": a little cloud that bursts outward and fades.
+void Dock::UpdatePoof(double t) {
+    const double g = ghostSize_ / 2.0;
+    const double ease = 1 - std::pow(1 - t, 3);
+    for (int i = 0; i <= kPuffs; ++i) {
+        const bool center = i == kPuffs;
+        const double angle = 2 * std::numbers::pi * i / kPuffs + 0.4;
+        const double dist = center ? 0 : (0.12 + 0.5 * ease) * dragSize_;
+        const double size = dragSize_ * (center ? 0.55 + 0.45 * ease : (i % 2 ? 0.38 : 0.48) + 0.3 * ease);
+        const double x = g + std::cos(angle) * dist - size / 2;
+        const double y = g + std::sin(angle) * dist - size / 2;
+        puffs_[i].Size({F(size), F(size)});
+        puffs_[i].Offset({F(x), F(y), 0});
+        puffs_[i].Opacity(F(0.9 * std::pow(1 - t, 1.6)));
+    }
+}
+
+// ---------------------------------------------------------------- Files dropped from Explorer
+
+bool Dock::CanPin(const std::vector<std::wstring>& files) const {
+    if (files.size() != 1) return false;
+    const std::wstring& f = files[0];
+    const DWORD attrs = GetFileAttributesW(f.c_str());
+    return EndsWith(f, L".exe") || EndsWith(f, L".lnk") ||
+           (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+void Dock::SetDropHighlight(int itemId) {
+    if (itemId == dropHighlightId_) return;
+    if (DockItem* old = FindItem(dropHighlightId_)) old->dim.Opacity(0);
+    dropHighlightId_ = itemId;
+    if (DockItem* it = FindItem(itemId)) it->dim.Opacity(0.25f);
+}
+
+DWORD Dock::DropOver(POINT screen) {
+    POINT c = screen;
+    ScreenToClient(hwnd_, &c);
+    mouseX_ = c.x;
+    mouseY_ = c.y;
+    ToDock(edge_, c.x, c.y, m_.winW, m_.winH, mouseU_, mouseV_);
+    if (!hovering_) {
+        hovering_ = true;
+        KillTimer(hwnd_, kTimerHide);
+        magnify_.target = cfg_.magnification ? 1 : 0;
+        UpdateRegion();
+    }
+    ApplyLayout();
+    StartAnimating();
+    const int idx = mouseV_ <= m_.margin + m_.shelfH + m_.maxIcon ? HitTest(mouseU_) : -1;
+    DockItem* it = idx >= 0 ? items_[idx].get() : nullptr;
+    SetDropHighlight(it ? it->id : 0);
+    hoverId_ = it ? it->id : 0;
+    UpdateLabel();
+    if (it) return DROPEFFECT_COPY;                    // open the files with this app
+    if (CanPin(dropFiles_)) return DROPEFFECT_LINK;    // add the app/folder to the dock
+    return DROPEFFECT_NONE;
+}
+
+void Dock::DropLeave() {
+    SetDropHighlight(0);
+    dropFiles_.clear();
+    OnMouseLeave();
+}
+
+DWORD Dock::DropFiles(const std::vector<std::wstring>& files, POINT screen) {
+    dropFiles_ = files;
+    const DWORD effect = DropOver(screen);
+    if (effect == DROPEFFECT_COPY) {
+        if (DockItem* it = FindItem(dropHighlightId_)) {
+            const std::wstring exe = !it->matchExe.empty() ? it->matchExe : it->path;
+            OpenFilesWith(exe, it->path.empty() ? it->aumid : L"", files);
+            if (it->windows.empty() && cfg_.launchBounce) StartBounce(*it, false);
+            ScheduleRescan(true);
+        }
+    } else if (effect == DROPEFFECT_LINK) {
+        PinAt(files[0], mouseU_);
+    }
+    DropLeave();
+    return effect;
 }
 
 // ---------------------------------------------------------------- Hiding
@@ -895,6 +1281,8 @@ bool Dock::StepAnimations(double dt) {
         DockItem& it = *p;
         step(it.presence, 0.002);
         step(it.dot, 0.002);
+        step(it.shiftU, 0.05);
+        step(it.shiftV, 0.05);
         if (it.bouncing) {
             active = true;
             const double period = it.attention ? kAttentionBouncePeriod : kLaunchBouncePeriod;
@@ -915,6 +1303,19 @@ bool Dock::StepAnimations(double dt) {
         }
     }
 
+    if (poofTime_ >= 0) {
+        active = true;
+        poofTime_ += dt;
+        const double t = poofTime_ / kPoofDuration;
+        if (t >= 1) {
+            poofTime_ = -1;
+            for (auto& p : puffs_) p.IsVisible(false);
+            ghost_.Hide();
+        } else {
+            UpdatePoof(t);
+        }
+    }
+
     // Drop items that finished their exit animation.
     for (size_t i = 0; i < items_.size();) {
         DockItem& it = *items_[i];
@@ -922,6 +1323,7 @@ bool Dock::StepAnimations(double dt) {
             iconLayer_.Children().Remove(it.root);
             dots_.Children().Remove(it.dotVisual);
             if (labelItemId_ == it.id) labelItemId_ = 0;
+            if (dropHighlightId_ == it.id) dropHighlightId_ = 0;
             items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(i));
         } else {
             ++i;
@@ -930,11 +1332,10 @@ bool Dock::StepAnimations(double dt) {
     return active;
 }
 
-void Dock::ApplyLayout() {
+LayoutResult Dock::ComputeCurrentLayout() const {
     std::vector<double> presence;
     presence.reserve(items_.size());
     for (const auto& it : items_) presence.push_back(it->presence.value);
-
     LayoutParams p;
     p.iconSize = m_.icon;
     p.gap = m_.gap;
@@ -943,7 +1344,11 @@ void Dock::ApplyLayout() {
     p.amount = magnify_.value;
     p.mouseX = mouseU_;
     p.centerX = m_.axis / 2.0;
-    layout_ = ComputeLayout(presence, p);
+    return ComputeLayout(presence, p);
+}
+
+void Dock::ApplyLayout() {
+    layout_ = ComputeCurrentLayout();
 
     if (items_.empty()) {
         shelfLeft_ = m_.axis / 2.0 - 30 * m_.scale;
@@ -981,18 +1386,48 @@ void Dock::ApplyLayout() {
         DockItem& it = *items_[i];
         const double pr = std::clamp(it.presence.value, 0.0, 1.0);
         it.size = layout_.size[i];
-        it.cu = layout_.center[i];
-        const double nearV = m_.iconNear + it.bounceOffset;
+        it.cu = layout_.center[i] + it.shiftU.value;
+        const double nearV = m_.iconNear + it.bounceOffset + it.shiftV.value;
         it.reach = nearV + it.size;
         const WinRect ir = Map(it.cu - it.size / 2, nearV, it.size, it.size);
         it.root.Offset({F(ir.x), F(ir.y), 0});
         it.root.Size({F(ir.w), F(ir.h)});
-        it.root.Opacity(F(pr));
-        const WinRect dr = Map(it.cu - d / 2, m_.margin + m_.padNear / 2 - d / 2, d, d);
+        it.root.Opacity((dragging_ && it.id == pressedId_) ? 0.0f : F(pr));  // the ghost shows it while dragging
+        const WinRect dr = Map(layout_.center[i] - d / 2, m_.margin + m_.padNear / 2 - d / 2, d, d);
         it.dotVisual.Offset({F(dr.x), F(dr.y), 0});
         it.dotVisual.Opacity(cfg_.showDots ? F(it.dot.value * pr) : 0.0f);
     }
     UpdateLabel();
+}
+
+// A rounded label bubble with text (app names, "Remove").
+wuc::CompositionSurfaceBrush Dock::MakeBubble(const std::wstring& text, float& width) const {
+    const float s = F(m_.scale);
+    const float padX = 11 * s;
+    winrt::com_ptr<IDWriteTextLayout> layout;
+    if (!labelFormat_ || FAILED(gfx_.DWrite()->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), labelFormat_.get(),
+                                                                F(m_.labelMaxW) - 2 * padX, 400.0f, layout.put()))) {
+        width = 0;
+        return nullptr;
+    }
+    DWRITE_TEXT_METRICS tm{};
+    layout->GetMetrics(&tm);
+    width = std::ceil(std::min(tm.widthIncludingTrailingWhitespace, F(m_.labelMaxW) - 2 * padX) + 2 * padX);
+    const float height = F(m_.labelH);
+    const bool dark = Dark();
+    const auto surface = gfx_.CreateSurface(static_cast<int>(width), static_cast<int>(height));
+    gfx_.Draw(surface, [&](ID2D1DeviceContext* dc) {
+        winrt::com_ptr<ID2D1SolidColorBrush> bg, edge, fg;
+        dc->CreateSolidColorBrush(dark ? D2D1::ColorF(0.13f, 0.13f, 0.13f, 0.92f) : D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.95f), bg.put());
+        dc->CreateSolidColorBrush(dark ? D2D1::ColorF(1, 1, 1, 0.15f) : D2D1::ColorF(0, 0, 0, 0.12f), edge.put());
+        dc->CreateSolidColorBrush(dark ? D2D1::ColorF(1, 1, 1, 0.95f) : D2D1::ColorF(0.08f, 0.08f, 0.08f, 1), fg.put());
+        dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        const auto rr = D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, width - 0.5f, height - 0.5f), 6 * s, 6 * s);
+        dc->FillRoundedRectangle(rr, bg.get());
+        dc->DrawRoundedRectangle(rr, edge.get(), 1.0f);
+        dc->DrawTextLayout(D2D1::Point2F(padX, (height - tm.height) / 2), layout.get(), fg.get());
+    });
+    return gfx_.Comp().CreateSurfaceBrush(surface);
 }
 
 void Dock::UpdateLabel() {
@@ -1005,32 +1440,11 @@ void Dock::UpdateLabel() {
             label_.IsVisible(false);
             return;
         }
-        const std::wstring text = it->name.empty() ? L"…" : it->name;
-        const float s = F(m_.scale);
-        const float padX = 11 * s;
-        winrt::com_ptr<IDWriteTextLayout> layout;
-        if (FAILED(gfx_.DWrite()->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), labelFormat_.get(),
-                                                   F(m_.labelMaxW) - 2 * padX, 400.0f, layout.put())))
-            return;
-        DWRITE_TEXT_METRICS tm{};
-        layout->GetMetrics(&tm);
-        const float width = std::ceil(std::min(tm.widthIncludingTrailingWhitespace, F(m_.labelMaxW) - 2 * padX) + 2 * padX);
-        const float height = F(m_.labelH);
-        const bool dark = cfg_.theme != "light";
-        const auto surface = gfx_.CreateSurface(static_cast<int>(width), static_cast<int>(height));
-        gfx_.Draw(surface, [&](ID2D1DeviceContext* dc) {
-            winrt::com_ptr<ID2D1SolidColorBrush> bg, edge, fg;
-            dc->CreateSolidColorBrush(dark ? D2D1::ColorF(0.13f, 0.13f, 0.13f, 0.92f) : D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.95f), bg.put());
-            dc->CreateSolidColorBrush(dark ? D2D1::ColorF(1, 1, 1, 0.15f) : D2D1::ColorF(0, 0, 0, 0.12f), edge.put());
-            dc->CreateSolidColorBrush(dark ? D2D1::ColorF(1, 1, 1, 0.95f) : D2D1::ColorF(0.08f, 0.08f, 0.08f, 1), fg.put());
-            dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            const auto rr = D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, width - 0.5f, height - 0.5f), 6 * s, 6 * s);
-            dc->FillRoundedRectangle(rr, bg.get());
-            dc->DrawRoundedRectangle(rr, edge.get(), 1.0f);
-            dc->DrawTextLayout(D2D1::Point2F(padX, (height - tm.height) / 2), layout.get(), fg.get());
-        });
-        label_.Brush(gfx_.Comp().CreateSurfaceBrush(surface));
-        label_.Size({width, height});
+        float width = 0;
+        const auto brush = MakeBubble(it->name.empty() ? L"…" : it->name, width);
+        if (!brush) return;
+        label_.Brush(brush);
+        label_.Size({width, F(m_.labelH)});
         labelW_ = width;
         label_.IsVisible(true);
     }
@@ -1057,7 +1471,9 @@ void Dock::UpdateRegion() {
         return;
     }
     RECT want{};
-    if (hovering_ || !magnify_.Settled(0.002) || !hide_.Settled(0.001)) {
+    bool moving = !magnify_.Settled(0.002) || !hide_.Settled(0.001);
+    for (const auto& it : items_) moving = moving || !it->shiftU.Settled(0.05) || !it->shiftV.Settled(0.05);
+    if (hovering_ || dragging_ || moving) {
         want = {0, 0, m_.winW, m_.winH};
     } else {
         const double e = shadowExtent_ + 8 * m_.scale;
@@ -1151,6 +1567,7 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             return 0;
         case WM_MOUSELEAVE:
+            Log(L"WM_MOUSELEAVE (hovering=%d pressed=%d)", hovering_ ? 1 : 0, pressedId_);
             trackingLeave_ = false;
             if (!pressedId_) OnMouseLeave();
             return 0;
@@ -1161,7 +1578,11 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             OnLeftUp();
             return 0;
         case WM_RBUTTONUP:
-            OnRightUp(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            OnRightUp();
+            return 0;
+        case WM_CAPTURECHANGED:
+            // Someone took the mouse away mid-drag (e.g. Alt+Tab): finish the drag where it is.
+            if (dragging_ && reinterpret_cast<HWND>(lp) != hwnd_) EndDrag();
             return 0;
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
@@ -1177,7 +1598,10 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     SetTimer(hwnd_, kTimerHide, Ms(std::max(cfg_.hideDelay, 0.8)), nullptr);
                     break;
                 case kTimerHide:
-                    if (AutoHideActive() && !hovering_ && !menuOpen_) SetHidden(true);
+                    if (AutoHideActive() && !hovering_ && !menuOpen_ && !dragging_) SetHidden(true);
+                    break;
+                case kTimerHold:
+                    OnHoldTimer();
                     break;
                 default:
                     Rescan();

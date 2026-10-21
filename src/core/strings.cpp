@@ -50,6 +50,13 @@ const wchar_t* Tr(Text t) {
         case Text::PositionBottom: return g_serbian ? L"Dole" : L"Bottom";
         case Text::PositionRight: return g_serbian ? L"Desno" : L"Right";
         case Text::HideTaskbar: return g_serbian ? L"Sakrij Windows taskbar" : L"Hide the Windows taskbar";
+        case Text::Options: return g_serbian ? L"Opcije" : L"Options";
+        case Text::ShowAllWindows: return g_serbian ? L"Prikaži sve prozore" : L"Show All Windows";
+        case Text::Hide: return g_serbian ? L"Sakrij" : L"Hide";
+        case Text::ForceQuit: return g_serbian ? L"Prisilno zatvori" : L"Force Quit";
+        case Text::Open: return g_serbian ? L"Otvori" : L"Open";
+        case Text::Remove: return g_serbian ? L"Ukloni" : L"Remove";
+        case Text::Minimized: return g_serbian ? L"Minimizovan" : L"Minimized";
     }
     return L"";
 }

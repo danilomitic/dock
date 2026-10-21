@@ -10,6 +10,7 @@
 #include <shobjidl.h>
 #include <winrt/base.h>
 
+#include <algorithm>
 #include <thread>
 
 #include "core/log.h"
@@ -148,6 +149,68 @@ void LaunchApp(const std::wstring& path, const std::wstring& aumid) {
         if (!ShellExecuteExW(&sei)) Log(L"Launch failed (%lu): %s", GetLastError(), target.c_str());
         CoUninitialize();
     }).detach();
+}
+
+void OpenFilesWith(const std::wstring& exe, const std::wstring& aumid, std::vector<std::wstring> files) {
+    std::thread([exe, aumid, files = std::move(files)] {
+        (void)CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        bool done = false;
+        if (exe.empty() && !aumid.empty()) {
+            // Store apps: ask Windows to activate the app for these files.
+            winrt::com_ptr<IApplicationActivationManager> mgr;
+            std::vector<PIDLIST_ABSOLUTE> pidls;
+            for (const auto& f : files) {
+                PIDLIST_ABSOLUTE pidl = nullptr;
+                if (SUCCEEDED(SHParseDisplayName(f.c_str(), nullptr, &pidl, 0, nullptr))) pidls.push_back(pidl);
+            }
+            winrt::com_ptr<IShellItemArray> items;
+            if (!pidls.empty() &&
+                SUCCEEDED(SHCreateShellItemArrayFromIDLists(static_cast<UINT>(pidls.size()),
+                                                            const_cast<PCIDLIST_ABSOLUTE_ARRAY>(pidls.data()), items.put())) &&
+                SUCCEEDED(CoCreateInstance(CLSID_ApplicationActivationManager, nullptr, CLSCTX_LOCAL_SERVER,
+                                           IID_PPV_ARGS(mgr.put())))) {
+                DWORD pid = 0;
+                done = SUCCEEDED(mgr->ActivateForFile(aumid.c_str(), items.get(), L"open", &pid));
+            }
+            for (auto p : pidls) CoTaskMemFree(p);
+        }
+        if (!done && !exe.empty()) {
+            std::wstring args;
+            for (const auto& f : files) args += L"\"" + f + L"\" ";
+            SHELLEXECUTEINFOW sei{sizeof(sei)};
+            sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+            sei.lpFile = exe.c_str();
+            sei.lpParameters = args.c_str();
+            sei.nShow = SW_SHOWNORMAL;
+            if (!ShellExecuteExW(&sei)) Log(L"OpenFilesWith failed (%lu): %s", GetLastError(), exe.c_str());
+        }
+        CoUninitialize();
+    }).detach();
+}
+
+void MinimizeWindows(const std::vector<HWND>& windows) {
+    for (HWND w : windows) ShowWindowAsync(w, SW_MINIMIZE);
+}
+
+void CloseWindows(const std::vector<HWND>& windows) {
+    for (HWND w : windows) PostMessageW(w, WM_CLOSE, 0, 0);
+}
+
+void ForceQuitWindows(const std::vector<HWND>& windows) {
+    std::vector<DWORD> pids;
+    for (HWND w : windows) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w, &pid);
+        // UWP windows belong to ApplicationFrameHost; the app owns the CoreWindow child.
+        if (HWND core = FindWindowExW(w, nullptr, L"Windows.UI.Core.CoreWindow", nullptr)) GetWindowThreadProcessId(core, &pid);
+        if (pid && std::find(pids.begin(), pids.end(), pid) == pids.end()) pids.push_back(pid);
+    }
+    for (DWORD pid : pids) {
+        if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid)) {
+            TerminateProcess(h, 1);
+            CloseHandle(h);
+        }
+    }
 }
 
 void ShowInExplorer(const std::wstring& path) {

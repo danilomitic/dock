@@ -18,12 +18,21 @@
 #include <winrt/Windows.UI.h>
 
 #include <functional>
+#include <utility>
+#include <vector>
 
 namespace dx {
 
 namespace wuc = winrt::Windows::UI::Composition;
 using float2 = winrt::Windows::Foundation::Numerics::float2;
 using float3 = winrt::Windows::Foundation::Numerics::float3;
+
+// A soft drop shadow for a rounded rectangle, stretched with a nine-grid brush.
+// Size the visual `extent` px larger than the shape on every side.
+struct ShadowBrush {
+    wuc::CompositionNineGridBrush brush{nullptr};
+    float extent = 0;
+};
 
 // Owns the GPU devices and the Windows.UI.Composition tree for one window.
 // Everything visible is a composition visual; the system compositor animates
@@ -42,7 +51,17 @@ public:
     // Draws into a surface with Direct2D. The context uses 96 DPI, so 1 unit = 1 pixel.
     bool Draw(const wuc::CompositionDrawingSurface& surface, const std::function<void(ID2D1DeviceContext*)>& fn) const;
 
+    ShadowBrush CreateShadow(float radius, float sigma) const;
+
+    // A composition tree for another window (menus, popups) sharing this compositor.
+    wuc::ContainerVisual AttachWindow(HWND hwnd);
+    void DetachWindow(HWND hwnd);
+
+    // The Windows accent color (used for menu highlights, like macOS).
+    winrt::Windows::UI::Color Accent() const;
+
 private:
+    std::vector<std::pair<HWND, wuc::Desktop::DesktopWindowTarget>> extraTargets_;
     winrt::Windows::System::DispatcherQueueController dispatcher_{nullptr};
     wuc::Compositor compositor_{nullptr};
     wuc::Desktop::DesktopWindowTarget target_{nullptr};

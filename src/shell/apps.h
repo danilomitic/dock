@@ -27,6 +27,11 @@ ShortcutInfo ReadShortcut(const std::wstring& lnkPath);
 
 // Launches without blocking the UI thread.
 void LaunchApp(const std::wstring& path, const std::wstring& aumid);
+// Opens files with an app (files dropped on its dock icon).
+void OpenFilesWith(const std::wstring& exe, const std::wstring& aumid, std::vector<std::wstring> files);
+void MinimizeWindows(const std::vector<HWND>& windows);
+void CloseWindows(const std::vector<HWND>& windows);
+void ForceQuitWindows(const std::vector<HWND>& windows);
 void ShowInExplorer(const std::wstring& path);
 void ActivateWindow(HWND hwnd);
 std::wstring WindowTitle(HWND hwnd);
