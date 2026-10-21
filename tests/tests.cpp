@@ -1,0 +1,149 @@
+// Minimal unit tests for the pure parts (layout math, springs, config/JSON).
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+
+#include "anim/spring.h"
+#include "core/config.h"
+#include "core/json.h"
+#include "ui/layout.h"
+
+namespace {
+int g_failed = 0;
+#define CHECK(cond)                                                       \
+    do {                                                                  \
+        if (!(cond)) {                                                    \
+            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);   \
+            ++g_failed;                                                   \
+        }                                                                 \
+    } while (0)
+
+bool Near(double a, double b, double eps = 1e-6) { return std::abs(a - b) < eps; }
+
+void TestFalloff() {
+    CHECK(Near(dx::MagnifyFalloff(0, 100), 1));
+    CHECK(Near(dx::MagnifyFalloff(100, 100), 0));
+    CHECK(Near(dx::MagnifyFalloff(-50, 100), 0.5));
+    CHECK(dx::MagnifyFalloff(200, 100) == 0);
+}
+
+void TestRestLayoutCentered() {
+    dx::LayoutParams p;
+    p.iconSize = 48;
+    p.gap = 6;
+    p.centerX = 500;
+    p.amount = 0;
+    const auto r = dx::ComputeLayout({1, 1, 1, 1}, p);
+    CHECK(Near((r.start + r.end) / 2, 500));
+    CHECK(Near(r.end - r.start, 4 * 54));
+    for (double s : r.size) CHECK(Near(s, 48));
+}
+
+void TestCursorPointStaysFixed() {
+    dx::LayoutParams p;
+    p.centerX = 500;
+    p.amount = 1;
+    p.maxScale = 2;
+    const std::vector<double> presence(7, 1.0);
+    for (double mx = 330; mx <= 670; mx += 7.3) {
+        p.mouseX = mx;
+        dx::LayoutParams rest = p;
+        rest.amount = 0;
+        const auto r0 = dx::ComputeLayout(presence, rest);
+        const auto r1 = dx::ComputeLayout(presence, p);
+        if (mx <= r0.start || mx >= r0.end) continue;
+        // Same fractional position inside the same slot.
+        for (size_t i = 0; i < presence.size(); ++i) {
+            if (mx >= r0.slotLeft[i] && mx < r0.slotRight[i]) {
+                const double t0 = (mx - r0.slotLeft[i]) / (r0.slotRight[i] - r0.slotLeft[i]);
+                const double t1 = (mx - r1.slotLeft[i]) / (r1.slotRight[i] - r1.slotLeft[i]);
+                CHECK(Near(t0, t1, 1e-9));
+            }
+        }
+    }
+}
+
+void TestNoOverlapAndMonotonic() {
+    dx::LayoutParams p;
+    p.centerX = 400;
+    p.amount = 1;
+    p.maxScale = 2.5;
+    p.mouseX = 410;
+    const auto r = dx::ComputeLayout({1, 1, 0.3, 1, 1, 1}, p);
+    for (size_t i = 0; i + 1 < r.center.size(); ++i) {
+        CHECK(r.center[i] < r.center[i + 1]);
+        CHECK(Near(r.slotRight[i], r.slotLeft[i + 1]));
+    }
+}
+
+void TestContinuityAcrossSlots() {
+    dx::LayoutParams p;
+    p.centerX = 400;
+    p.amount = 1;
+    p.maxScale = 2;
+    const std::vector<double> presence(5, 1.0);
+    double prevStart = 0;
+    bool first = true;
+    for (double mx = 200; mx <= 600; mx += 0.25) {
+        p.mouseX = mx;
+        const auto r = dx::ComputeLayout(presence, p);
+        if (!first) CHECK(std::abs(r.start - prevStart) < 2.0);  // no jumps
+        prevStart = r.start;
+        first = false;
+    }
+}
+
+void TestSpring() {
+    dx::Spring s;
+    s.target = 1;
+    s.response = 0.3;
+    s.damping = 1;
+    double maxV = 0;
+    for (int i = 0; i < 240; ++i) {
+        s.Step(1.0 / 120);
+        maxV = std::max(maxV, s.value);
+    }
+    CHECK(s.Settled(1e-3));
+    CHECK(maxV <= 1.0 + 1e-3);  // critically damped: no overshoot
+}
+
+void TestJsonAndConfig() {
+    const auto v = dx::json::Parse(R"({"a": [1, 2.5, "x\u00e9"], "b": {"c": true}})");
+    CHECK(v.has_value());
+    CHECK(v->Find("a")->array->size() == 3);
+    CHECK(v->Find("a")->array->at(2).string == "x\xC3\xA9");
+    CHECK(v->Find("b")->Bool("c", false));
+    CHECK(!dx::json::Parse("{\"a\": }").has_value());
+
+    dx::Config c;
+    c.iconSize = 52;
+    c.theme = "light";
+    c.glassTint = 0x123456;
+    c.pinned.push_back({L"C:\\Windows\\explorer.exe", L""});
+    c.pinned.push_back({L"", L"Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"});
+    const dx::Config d = dx::ParseConfig(dx::SerializeConfig(c));
+    CHECK(Near(d.iconSize, 52));
+    CHECK(d.theme == "light");
+    CHECK(d.glassTint && *d.glassTint == 0x123456);
+    CHECK(d.pinnedInitialized && d.pinned.size() == 2);
+    CHECK(d.pinned[0].path == L"C:\\Windows\\explorer.exe");
+    CHECK(d.pinned[1].aumid == L"Microsoft.WindowsNotepad_8wekyb3d8bbwe!App");
+}
+}  // namespace
+
+int main() {
+    TestFalloff();
+    TestRestLayoutCentered();
+    TestCursorPointStaysFixed();
+    TestNoOverlapAndMonotonic();
+    TestContinuityAcrossSlots();
+    TestSpring();
+    TestJsonAndConfig();
+    if (g_failed) {
+        std::printf("%d check(s) failed\n", g_failed);
+        return EXIT_FAILURE;
+    }
+    std::printf("All tests passed\n");
+    return EXIT_SUCCESS;
+}

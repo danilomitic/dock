@@ -1,0 +1,160 @@
+#include "core/config.h"
+
+#include <windows.h>
+#include <shlobj.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+
+#include "core/json.h"
+#include "core/log.h"
+#include "core/strings.h"
+
+namespace dx {
+namespace {
+
+std::optional<uint32_t> ParseColor(const std::string& s) {
+    if (s.size() != 7 || s[0] != '#') return std::nullopt;
+    uint32_t v = 0;
+    for (size_t i = 1; i < 7; ++i) {
+        const char c = s[i];
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= static_cast<uint32_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') v |= static_cast<uint32_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v |= static_cast<uint32_t>(c - 'A' + 10);
+        else return std::nullopt;
+    }
+    return v;
+}
+
+std::string FormatColor(uint32_t v) {
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "#%06X", v & 0xFFFFFF);
+    return buf;
+}
+
+double Clamp(double v, double lo, double hi) { return std::clamp(v, lo, hi); }
+
+}  // namespace
+
+std::wstring ConfigDir() {
+    PWSTR base = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &base))) {
+        dir = std::wstring(base) + L"\\DockX";
+        CoTaskMemFree(base);
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    return dir;
+}
+
+std::wstring ConfigPath() { return ConfigDir() + L"\\config.json"; }
+
+Config ParseConfig(std::string_view text) {
+    Config c;
+    const auto root = json::Parse(text);
+    if (!root || root->type != json::Value::Type::Object) return c;
+    const json::Value& v = *root;
+
+    c.language = v.Str("language", c.language);
+    c.theme = v.Str("theme", c.theme) == "light" ? "light" : "dark";
+    c.iconSize = Clamp(v.Num("iconSize", c.iconSize), 16, 128);
+    c.spacing = Clamp(v.Num("spacing", c.spacing), 0, 32);
+    c.shelfPadding = Clamp(v.Num("shelfPadding", c.shelfPadding), 0, 32);
+    c.cornerRadius = Clamp(v.Num("cornerRadius", c.cornerRadius), 0, 40);
+    c.magnification = v.Bool("magnification", c.magnification);
+    c.magnifiedSize = Clamp(v.Num("magnifiedSize", c.magnifiedSize), c.iconSize, 256);
+    c.magnificationRange = Clamp(v.Num("magnificationRange", c.magnificationRange), 1, 8);
+    c.magnifyResponse = Clamp(v.Num("magnifyResponse", c.magnifyResponse), 0.05, 1.0);
+    c.blur = v.Bool("blur", c.blur);
+    c.glassTint = ParseColor(v.Str("glassTint", ""));
+    c.glassOpacity = Clamp(v.Num("glassOpacity", c.glassOpacity), 0, 1);
+    c.border = v.Bool("border", c.border);
+    c.shadow = v.Bool("shadow", c.shadow);
+    c.shadowOpacity = Clamp(v.Num("shadowOpacity", c.shadowOpacity), 0, 1);
+    c.showDots = v.Bool("showDots", c.showDots);
+    c.showLabels = v.Bool("showLabels", c.showLabels);
+    c.launchBounce = v.Bool("launchBounce", c.launchBounce);
+    c.attentionBounce = v.Bool("attentionBounce", c.attentionBounce);
+    c.animationSpeed = Clamp(v.Num("animationSpeed", c.animationSpeed), 0.25, 4);
+    c.logging = v.Bool("logging", c.logging);
+
+    if (const json::Value* p = v.Find("pinned"); p && p->type == json::Value::Type::Array) {
+        c.pinnedInitialized = true;
+        for (const auto& item : *p->array) {
+            PinnedItem pi{Widen(item.Str("path", "")), Widen(item.Str("aumid", ""))};
+            if (!pi.path.empty() || !pi.aumid.empty()) c.pinned.push_back(std::move(pi));
+        }
+    }
+    return c;
+}
+
+std::string SerializeConfig(const Config& c) {
+    std::string o = "{\n";
+    auto kv = [&o](const char* k, const std::string& val) {
+        o += "  ";
+        o += json::Quote(k);
+        o += ": ";
+        o += val;
+        o += ",\n";
+    };
+    auto b = [](bool x) { return std::string(x ? "true" : "false"); };
+    kv("language", json::Quote(c.language));
+    kv("theme", json::Quote(c.theme));
+    kv("iconSize", json::Number(c.iconSize));
+    kv("spacing", json::Number(c.spacing));
+    kv("shelfPadding", json::Number(c.shelfPadding));
+    kv("cornerRadius", json::Number(c.cornerRadius));
+    kv("magnification", b(c.magnification));
+    kv("magnifiedSize", json::Number(c.magnifiedSize));
+    kv("magnificationRange", json::Number(c.magnificationRange));
+    kv("magnifyResponse", json::Number(c.magnifyResponse));
+    kv("blur", b(c.blur));
+    kv("glassTint", json::Quote(c.glassTint ? FormatColor(*c.glassTint) : ""));
+    kv("glassOpacity", json::Number(c.glassOpacity));
+    kv("border", b(c.border));
+    kv("shadow", b(c.shadow));
+    kv("shadowOpacity", json::Number(c.shadowOpacity));
+    kv("showDots", b(c.showDots));
+    kv("showLabels", b(c.showLabels));
+    kv("launchBounce", b(c.launchBounce));
+    kv("attentionBounce", b(c.attentionBounce));
+    kv("animationSpeed", json::Number(c.animationSpeed));
+    kv("logging", b(c.logging));
+    o += "  \"pinned\": [";
+    for (size_t i = 0; i < c.pinned.size(); ++i) {
+        o += i ? ",\n    " : "\n    ";
+        o += "{ \"path\": " + json::Quote(Narrow(c.pinned[i].path)) + ", \"aumid\": " + json::Quote(Narrow(c.pinned[i].aumid)) + " }";
+    }
+    o += c.pinned.empty() ? "]\n}\n" : "\n  ]\n}\n";
+    return o;
+}
+
+Config LoadConfig() {
+    std::ifstream f(ConfigPath(), std::ios::binary);
+    if (!f) return Config{};
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ParseConfig(ss.str());
+}
+
+bool SaveConfig(const Config& c) {
+    const std::wstring path = ConfigPath();
+    const std::wstring tmp = path + L".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        const std::string text = SerializeConfig(c);
+        f.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!f) return false;
+    }
+    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        Log(L"SaveConfig: MoveFileEx failed (%lu)", GetLastError());
+        return false;
+    }
+    return true;
+}
+
+}  // namespace dx

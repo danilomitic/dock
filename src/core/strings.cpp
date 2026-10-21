@@ -1,0 +1,51 @@
+#include "core/strings.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <cwctype>
+
+namespace dx {
+
+std::wstring Widen(std::string_view s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
+
+std::string Narrow(std::wstring_view s) {
+    if (s.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+std::wstring Lower(std::wstring s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+    return s;
+}
+
+namespace {
+bool g_serbian = true;
+}
+
+void SetLanguage(std::string_view lang) { g_serbian = (lang != "en"); }
+
+const wchar_t* Tr(Text t) {
+    switch (t) {
+        case Text::KeepInDock: return g_serbian ? L"Zadrži u Docku" : L"Keep in Dock";
+        case Text::ShowInExplorer: return g_serbian ? L"Prikaži u Exploreru" : L"Show in Explorer";
+        case Text::Quit: return g_serbian ? L"Zatvori" : L"Quit";
+        case Text::Magnification: return g_serbian ? L"Uvećavanje" : L"Magnification";
+        case Text::QuitDock: return g_serbian ? L"Izađi iz DockX" : L"Quit DockX";
+        case Text::Settings: return g_serbian ? L"Podešavanja Docka…" : L"Dock Settings…";
+        case Text::NoWindows: return g_serbian ? L"Nema prozora" : L"No windows";
+        case Text::DarkTheme: return g_serbian ? L"Tamna tema" : L"Dark theme";
+    }
+    return L"";
+}
+
+}  // namespace dx
