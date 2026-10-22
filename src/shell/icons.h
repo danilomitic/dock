@@ -16,6 +16,9 @@ struct IconRequest {
     std::wstring source;   // path, or shell:AppsFolder\<aumid>
     std::wstring exePath;  // for the app name (file description)
     bool needIcon = true;  // false when the icon came from the disk cache
+    bool cache = true;     // false for files in a Stack (their thumbnails change)
+    int size = 256;        // pixels
+    bool thumbnail = false;  // allow picture/document previews instead of the file-type icon
 };
 
 struct IconResult {

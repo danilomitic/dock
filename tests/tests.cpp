@@ -94,6 +94,25 @@ void TestContinuityAcrossSlots() {
     }
 }
 
+void TestSeparators() {
+    dx::LayoutParams p;
+    p.centerX = 500;
+    p.separatorWidth = 12;
+    p.amount = 1;
+    p.maxScale = 2;
+    const std::vector<dx::LayoutEntry> entries{{1, false}, {1, false}, {1, true}, {1, false}};
+    for (double mx : {420.0, 470.0, 500.0, 530.0}) {
+        p.mouseX = mx;
+        const auto r = dx::ComputeLayout(entries, p);
+        CHECK(Near(r.slotRight[2] - r.slotLeft[2], 12));  // separators keep their width under magnification
+        CHECK(Near(r.size[2], 0));
+        for (size_t i = 0; i + 1 < entries.size(); ++i) CHECK(Near(r.slotRight[i], r.slotLeft[i + 1]));
+    }
+    p.amount = 0;
+    const auto rest = dx::ComputeLayout(entries, p);
+    CHECK(Near(rest.end - rest.start, 3 * 54 + 12));
+}
+
 void TestEdges() {
     const double W = 300, H = 1000;  // a left/right dock window is tall
     for (dx::Edge e : {dx::Edge::Bottom, dx::Edge::Left, dx::Edge::Right}) {
@@ -148,6 +167,9 @@ void TestJsonAndConfig() {
     c.glassTint = 0x123456;
     c.pinned.push_back({L"C:\\Windows\\explorer.exe", L""});
     c.pinned.push_back({L"", L"Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"});
+    c.stacks.push_back(L"C:\\Users\\x\\Downloads");
+    c.recent.push_back({L"C:\\app\\a.exe", L""});
+    c.stackView = "grid";
     const dx::Config d = dx::ParseConfig(dx::SerializeConfig(c));
     CHECK(Near(d.iconSize, 52));
     CHECK(d.theme == "light");
@@ -158,6 +180,9 @@ void TestJsonAndConfig() {
     CHECK(d.pinnedInitialized && d.pinned.size() == 2);
     CHECK(d.pinned[0].path == L"C:\\Windows\\explorer.exe");
     CHECK(d.pinned[1].aumid == L"Microsoft.WindowsNotepad_8wekyb3d8bbwe!App");
+    CHECK(d.stacksInitialized && d.stacks.size() == 1 && d.stacks[0] == L"C:\\Users\\x\\Downloads");
+    CHECK(d.recent.size() == 1 && d.recent[0].path == L"C:\\app\\a.exe");
+    CHECK(d.stackView == "grid");
 }
 }  // namespace
 
@@ -168,6 +193,7 @@ int main() {
     TestNoOverlapAndMonotonic();
     TestContinuityAcrossSlots();
     TestEdges();
+    TestSeparators();
     TestSpring();
     TestJsonAndConfig();
     if (g_failed) {

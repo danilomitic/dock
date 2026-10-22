@@ -31,6 +31,23 @@ enum class Text {
     Open,
     Remove,
     Minimized,
+    RecycleBin,
+    EmptyRecycleBin,
+    SortBy,
+    SortName,
+    SortDateAdded,
+    SortDateModified,
+    SortKind,
+    ViewContentAs,
+    ViewFan,
+    ViewGrid,
+    ViewList,
+    ViewAuto,
+    OpenInExplorer,
+    MoreInExplorer,  // "%d more in Explorer"
+    RemoveFromDock,
+    ShowRecent,
+    EmptyFolder,
 };
 void SetLanguage(std::string_view lang);
 const wchar_t* Tr(Text t);

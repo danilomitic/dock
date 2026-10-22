@@ -13,6 +13,13 @@ struct LayoutParams {
     double amount = 0;         // magnification strength 0..1 (animated)
     double mouseX = 0;         // cursor x, px
     double centerX = 0;        // where the resting dock is centered, px
+    double separatorWidth = 12;  // slot width of a separator line, px
+};
+
+// One slot in the dock: an icon, or a separator line between sections.
+struct LayoutEntry {
+    double presence = 1;     // 0..1 while being added or removed
+    bool separator = false;  // separators never magnify and have no icon
 };
 
 struct LayoutResult {
@@ -27,7 +34,8 @@ struct LayoutResult {
 // 1 at distance 0, falling smoothly to 0 at `radius` (cosine bell).
 double MagnifyFalloff(double distance, double radius);
 
-// presence[i] in 0..1 scales an icon's slot while it is added or removed.
+LayoutResult ComputeLayout(const std::vector<LayoutEntry>& entries, const LayoutParams& p);
+// All icons, no separators. presence[i] in 0..1 scales an icon's slot while it is added or removed.
 LayoutResult ComputeLayout(const std::vector<double>& presence, const LayoutParams& p);
 
 // ---- Screen edges ----

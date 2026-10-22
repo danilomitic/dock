@@ -1,5 +1,6 @@
 #include "shell/icons.h"
 
+#include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 
@@ -13,7 +14,6 @@
 namespace dx {
 namespace {
 
-constexpr int kIconPixels = 256;
 
 std::wstring CacheDir() {
     PWSTR base = nullptr;
@@ -66,13 +66,27 @@ void FixAlpha(IWICBitmap* bmp) {
     for (UINT i = 3; i < size; i += 4) data[i] = 255;
 }
 
-winrt::com_ptr<IWICBitmap> ExtractIcon(IWICImagingFactory* wic, const std::wstring& source) {
+// "stock:<SHSTOCKICONID>" — system icons like the empty/full Recycle Bin.
+winrt::com_ptr<IWICBitmap> ExtractStockIcon(IWICImagingFactory* wic, int id, int px) {
+    SHSTOCKICONINFO sii{sizeof(sii)};
+    if (FAILED(SHGetStockIconInfo(static_cast<SHSTOCKICONID>(id), SHGSI_ICONLOCATION, &sii))) return nullptr;
+    HICON icon = nullptr;
+    if (FAILED(SHDefExtractIconW(sii.szPath, sii.iIcon, 0, &icon, nullptr, MAKELONG(px, 16))) || !icon) return nullptr;
+    winrt::com_ptr<IWICBitmap> bmp;
+    const HRESULT hr = wic->CreateBitmapFromHICON(icon, bmp.put());
+    DestroyIcon(icon);
+    if (FAILED(hr)) return nullptr;
+    return ToPbgraBitmap(wic, bmp.get());
+}
+
+winrt::com_ptr<IWICBitmap> ExtractIcon(IWICImagingFactory* wic, const std::wstring& source, int px, bool thumbnail) {
+    if (source.starts_with(L"stock:")) return ExtractStockIcon(wic, _wtoi(source.c_str() + 6), px);
     winrt::com_ptr<IShellItemImageFactory> factory;
     if (FAILED(SHCreateItemFromParsingName(source.c_str(), nullptr, IID_PPV_ARGS(factory.put())))) return nullptr;
     HBITMAP hbm = nullptr;
-    const SIZE size{kIconPixels, kIconPixels};
-    if (FAILED(factory->GetImage(size, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &hbm)) &&
-        FAILED(factory->GetImage(size, SIIGBF_BIGGERSIZEOK, &hbm)))
+    const SIZE size{px, px};
+    const SIIGBF first = thumbnail ? (SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK) : (SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK);
+    if (FAILED(factory->GetImage(size, first, &hbm)) && FAILED(factory->GetImage(size, SIIGBF_BIGGERSIZEOK, &hbm)))
         return nullptr;
     winrt::com_ptr<IWICBitmap> bmp;
     const HRESULT hr = wic->CreateBitmapFromHBITMAP(hbm, nullptr, WICBitmapUsePremultipliedAlpha, bmp.put());
@@ -208,11 +222,11 @@ void IconLoader::Run() {
         }
         auto result = std::make_unique<IconResult>();
         result->id = req.id;
-        result->name = AppName(req.source, req.exePath);
+        if (!req.source.starts_with(L"stock:")) result->name = AppName(req.source, req.exePath);
         if (req.needIcon) {
-            result->bitmap = ExtractIcon(wic.get(), req.source);
-            if (result->bitmap) SavePng(wic.get(), result->bitmap.get(), CachePath(req.source));
-            else Log(L"No icon for %s", req.source.c_str());
+            result->bitmap = ExtractIcon(wic.get(), req.source, req.size, req.thumbnail);
+            if (result->bitmap && req.cache) SavePng(wic.get(), result->bitmap.get(), CachePath(req.source));
+            else if (!result->bitmap) Log(L"No icon for %s", req.source.c_str());
         }
         if (PostMessageW(hwnd_, msg_, 0, reinterpret_cast<LPARAM>(result.get()))) (void)result.release();
     }

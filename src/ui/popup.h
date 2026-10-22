@@ -33,6 +33,7 @@ public:
 
     [[nodiscard]] HWND Hwnd() const { return hwnd_; }
     [[nodiscard]] const wuc::ContainerVisual& Content() const { return content_; }
+    [[nodiscard]] const wuc::ContainerVisual& Root() const { return root_; }  // everything, incl. glass + shadow
     [[nodiscard]] int Margin() const { return margin_; }
     [[nodiscard]] RECT GlassRect() const { return {x_, y_, x_ + w_, y_ + h_}; }
     [[nodiscard]] bool Contains(POINT screen) const { const RECT r = GlassRect(); return PtInRect(&r, screen) != FALSE; }

@@ -57,6 +57,23 @@ const wchar_t* Tr(Text t) {
         case Text::Open: return g_serbian ? L"Otvori" : L"Open";
         case Text::Remove: return g_serbian ? L"Ukloni" : L"Remove";
         case Text::Minimized: return g_serbian ? L"Minimizovan" : L"Minimized";
+        case Text::RecycleBin: return g_serbian ? L"Korpa" : L"Recycle Bin";
+        case Text::EmptyRecycleBin: return g_serbian ? L"Isprazni korpu" : L"Empty Recycle Bin";
+        case Text::SortBy: return g_serbian ? L"Sortiraj po" : L"Sort by";
+        case Text::SortName: return g_serbian ? L"Imenu" : L"Name";
+        case Text::SortDateAdded: return g_serbian ? L"Datumu dodavanja" : L"Date Added";
+        case Text::SortDateModified: return g_serbian ? L"Datumu izmene" : L"Date Modified";
+        case Text::SortKind: return g_serbian ? L"Vrsti" : L"Kind";
+        case Text::ViewContentAs: return g_serbian ? L"Prikaži sadržaj kao" : L"View content as";
+        case Text::ViewFan: return g_serbian ? L"Lepeza" : L"Fan";
+        case Text::ViewGrid: return g_serbian ? L"Mreža" : L"Grid";
+        case Text::ViewList: return g_serbian ? L"Lista" : L"List";
+        case Text::ViewAuto: return g_serbian ? L"Automatski" : L"Automatic";
+        case Text::OpenInExplorer: return g_serbian ? L"Otvori u Exploreru" : L"Open in Explorer";
+        case Text::MoreInExplorer: return g_serbian ? L"Još %d u Exploreru" : L"%d more in Explorer";
+        case Text::RemoveFromDock: return g_serbian ? L"Ukloni iz Docka" : L"Remove from Dock";
+        case Text::ShowRecent: return g_serbian ? L"Prikaži nedavne aplikacije" : L"Show recent apps";
+        case Text::EmptyFolder: return g_serbian ? L"Prazno" : L"Empty";
     }
     return L"";
 }

@@ -52,8 +52,18 @@ struct Config {
 
     bool logging = false;
 
+    // Right side of the dock
+    bool showRecent = true;           // running + recently used apps after a separator (macOS default)
+    int recentCount = 3;              // closed apps kept in the recent section
+    bool showTrash = true;
+    std::string stackView = "auto";   // "auto" | "fan" | "grid" | "list"
+    std::string stackSort = "dateAdded";  // "dateAdded" | "name" | "dateModified" | "kind"
+
     bool pinnedInitialized = false;
     std::vector<PinnedItem> pinned;
+    bool stacksInitialized = false;
+    std::vector<std::wstring> stacks;  // folders shown as Stacks
+    std::vector<PinnedItem> recent;    // most recent first
 };
 
 std::wstring ConfigDir();   // %APPDATA%\DockX (created if missing)

@@ -2,6 +2,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -22,6 +23,7 @@ namespace dx {
 constexpr UINT WM_APP_TICK = WM_APP + 1;
 constexpr UINT WM_APP_ICON = WM_APP + 2;
 constexpr UINT WM_APP_BAR = WM_APP + 3;
+constexpr UINT WM_APP_SHELL = WM_APP + 4;  // Recycle Bin changed
 
 // Wakes the UI thread once per compositor frame, only while something animates.
 // When nothing moves, the thread sleeps on an event: 0 % CPU.
@@ -51,8 +53,12 @@ private:
 };
 
 struct DockItem {
+    enum class Kind { App, Stack, Trash };
+
     int id = 0;
+    Kind kind = Kind::App;
     bool pinned = false;
+    ULONGLONG lastUsed = 0;  // for the recent-apps section
     std::wstring path;   // launch target (.exe / .lnk / folder), empty for Store apps
     std::wstring aumid;
     std::wstring matchExe;    // lower-case exe path used to match windows
@@ -128,7 +134,16 @@ private:
 
     // Items
     void LoadPinned();
-    DockItem& AddItem(bool pinned, std::wstring path, std::wstring aumid, bool animate);
+    DockItem& AddItem(bool pinned, std::wstring path, std::wstring aumid, bool animate,
+                      DockItem::Kind kind = DockItem::Kind::App);
+    int Section(const DockItem& it) const;  // 0 pinned apps, 1 other apps, 2 stacks + trash
+    void ChangeOrder(const std::function<void()>& change);  // reorders with a smooth glide
+    void NormalizeOrder();
+    void UpdateTrash();
+    void TrimRecent();
+    void SaveRecent();
+    void SaveStacks();
+    void ShowStack(int itemId);
     void CreateItemVisuals(DockItem& it);
     void RequestIcon(DockItem& it);
     void SetIconBitmap(DockItem& it, IWICBitmap* bmp);
@@ -150,7 +165,7 @@ private:
     void OnHoldTimer();
     void Activate(DockItem& it);
     void StartBounce(DockItem& it, bool attention);
-    int HitTest(double u) const;
+    int HitTest(double u, bool* separator = nullptr) const;  // item index, -1 if none
     [[nodiscard]] bool Dark() const { return cfg_.theme != "light"; }
 
     // Menus and App Exposé
@@ -190,7 +205,8 @@ private:
     void StartAnimating();
     void Tick();
     bool StepAnimations(double dt);
-    LayoutResult ComputeCurrentLayout() const;
+    LayoutResult ComputeCurrentLayout(std::vector<int>* entryItem = nullptr, std::vector<int>* itemEntry = nullptr,
+                                      bool rest = false) const;
     void ApplyLayout();
     wuc::CompositionSurfaceBrush MakeBubble(const std::wstring& text, float& width) const;
     void UpdateLabel();
@@ -235,7 +251,13 @@ private:
     Spring magnify_;
     Spring hide_;  // 0 = shown, 1 = hidden off the edge
     LayoutResult layout_;
+    std::vector<int> entryItem_;  // layout slot -> item index (-1 = separator)
+    std::vector<int> itemEntry_;  // item index -> layout slot
     double shelfLeft_ = 0, shelfRight_ = 0;
+    bool dragWasPinned_ = false;
+    bool trashFull_ = false;
+    ULONG shellNotify_ = 0;
+    std::vector<wuc::SpriteVisual> separators_;
     RECT region_{};
     bool regionEmpty_ = false;
 

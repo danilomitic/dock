@@ -92,6 +92,26 @@ Config ParseConfig(std::string_view text) {
     c.attentionBounce = v.Bool("attentionBounce", c.attentionBounce);
     c.animationSpeed = Clamp(v.Num("animationSpeed", c.animationSpeed), 0.25, 4);
     c.logging = v.Bool("logging", c.logging);
+    c.showRecent = v.Bool("showRecent", c.showRecent);
+    c.recentCount = static_cast<int>(Clamp(v.Num("recentCount", c.recentCount), 0, 10));
+    c.showTrash = v.Bool("showTrash", c.showTrash);
+    {
+        const std::string view = v.Str("stackView", c.stackView);
+        c.stackView = (view == "fan" || view == "grid" || view == "list") ? view : "auto";
+        const std::string sort = v.Str("stackSort", c.stackSort);
+        c.stackSort = (sort == "name" || sort == "dateModified" || sort == "kind") ? sort : "dateAdded";
+    }
+    if (const json::Value* s = v.Find("stacks"); s && s->type == json::Value::Type::Array) {
+        c.stacksInitialized = true;
+        for (const auto& item : *s->array)
+            if (item.type == json::Value::Type::String && !item.string.empty()) c.stacks.push_back(Widen(item.string));
+    }
+    if (const json::Value* r = v.Find("recent"); r && r->type == json::Value::Type::Array) {
+        for (const auto& item : *r->array) {
+            PinnedItem pi{Widen(item.Str("path", "")), Widen(item.Str("aumid", ""))};
+            if (!pi.path.empty() || !pi.aumid.empty()) c.recent.push_back(std::move(pi));
+        }
+    }
 
     if (const json::Value* p = v.Find("pinned"); p && p->type == json::Value::Type::Array) {
         c.pinnedInitialized = true;
@@ -144,12 +164,31 @@ std::string SerializeConfig(const Config& c) {
     kv("attentionBounce", b(c.attentionBounce));
     kv("animationSpeed", json::Number(c.animationSpeed));
     kv("logging", b(c.logging));
-    o += "  \"pinned\": [";
-    for (size_t i = 0; i < c.pinned.size(); ++i) {
-        o += i ? ",\n    " : "\n    ";
-        o += "{ \"path\": " + json::Quote(Narrow(c.pinned[i].path)) + ", \"aumid\": " + json::Quote(Narrow(c.pinned[i].aumid)) + " }";
+    kv("showRecent", b(c.showRecent));
+    kv("recentCount", json::Number(c.recentCount));
+    kv("showTrash", b(c.showTrash));
+    kv("stackView", json::Quote(c.stackView));
+    kv("stackSort", json::Quote(c.stackSort));
+    auto items = [&o](const char* key, const std::vector<PinnedItem>& list, bool last) {
+        o += "  ";
+        o += json::Quote(key);
+        o += ": [";
+        for (size_t i = 0; i < list.size(); ++i) {
+            o += i ? ",\n    " : "\n    ";
+            o += "{ \"path\": " + json::Quote(Narrow(list[i].path)) + ", \"aumid\": " + json::Quote(Narrow(list[i].aumid)) + " }";
+        }
+        o += list.empty() ? "]" : "\n  ]";
+        o += last ? "\n" : ",\n";
+    };
+    o += "  \"stacks\": [";
+    for (size_t i = 0; i < c.stacks.size(); ++i) {
+        o += i ? ", " : "";
+        o += json::Quote(Narrow(c.stacks[i]));
     }
-    o += c.pinned.empty() ? "]\n}\n" : "\n  ]\n}\n";
+    o += "],\n";
+    items("recent", c.recent, false);
+    items("pinned", c.pinned, true);
+    o += "}\n";
     return o;
 }
 

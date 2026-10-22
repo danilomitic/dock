@@ -15,16 +15,24 @@ double MagnifyFalloff(double distance, double radius) {
 }
 
 LayoutResult ComputeLayout(const std::vector<double>& presence, const LayoutParams& p) {
-    const size_t n = presence.size();
+    std::vector<LayoutEntry> entries;
+    entries.reserve(presence.size());
+    for (double pr : presence) entries.push_back({pr, false});
+    return ComputeLayout(entries, p);
+}
+
+LayoutResult ComputeLayout(const std::vector<LayoutEntry>& entries, const LayoutParams& p) {
+    const size_t n = entries.size();
     LayoutResult r;
     r.center.resize(n);
     r.size.resize(n);
     r.slotLeft.resize(n);
     r.slotRight.resize(n);
 
-    // Resting layout: each icon owns a slot of (icon + gap) * presence.
+    // Resting layout: each icon owns a slot of (icon + gap) * presence; separators a thin fixed slot.
+    auto restWidth = [&p](const LayoutEntry& e) { return e.separator ? p.separatorWidth : p.iconSize + p.gap; };
     std::vector<double> rest(n + 1, 0.0);
-    for (size_t i = 0; i < n; ++i) rest[i + 1] = rest[i] + (p.iconSize + p.gap) * std::clamp(presence[i], 0.0, 1.0);
+    for (size_t i = 0; i < n; ++i) rest[i + 1] = rest[i] + restWidth(entries[i]) * std::clamp(entries[i].presence, 0.0, 1.0);
     const double restStart = p.centerX - rest[n] / 2;
 
     // Magnified slots: scale depends on the distance from the cursor in the resting layout.
@@ -32,11 +40,17 @@ LayoutResult ComputeLayout(const std::vector<double>& presence, const LayoutPara
     std::vector<double> scale(n, 1.0);
     std::vector<double> mag(n + 1, 0.0);
     for (size_t i = 0; i < n; ++i) {
-        const double pr = std::clamp(presence[i], 0.0, 1.0);
+        const double pr = std::clamp(entries[i].presence, 0.0, 1.0);
+        if (entries[i].separator) {
+            scale[i] = 0;
+            mag[i + 1] = mag[i] + p.separatorWidth * pr;
+            continue;
+        }
         const double c = restStart + (rest[i] + rest[i + 1]) / 2;
         scale[i] = 1 + (p.maxScale - 1) * std::clamp(p.amount, 0.0, 1.0) * MagnifyFalloff(p.mouseX - c, radius);
         mag[i + 1] = mag[i] + (p.iconSize * scale[i] + p.gap) * pr;
     }
+    const auto presenceAt = [&entries](size_t i) { return entries[i].presence; };
 
     // Keep the point under the cursor fixed, so the dock grows around it (like macOS).
     double start = restStart;
@@ -56,7 +70,7 @@ LayoutResult ComputeLayout(const std::vector<double>& presence, const LayoutPara
     }
 
     for (size_t i = 0; i < n; ++i) {
-        const double pr = std::clamp(presence[i], 0.0, 1.0);
+        const double pr = std::clamp(presenceAt(i), 0.0, 1.0);
         r.slotLeft[i] = start + mag[i];
         r.slotRight[i] = start + mag[i + 1];
         r.center[i] = (r.slotLeft[i] + r.slotRight[i]) / 2;

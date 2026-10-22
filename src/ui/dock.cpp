@@ -4,6 +4,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
+#include <shlwapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -11,10 +12,14 @@
 #include <numbers>
 #include <unordered_map>
 
+#include <shlobj.h>
+
 #include "core/log.h"
 #include "core/strings.h"
+#include "shell/files.h"
 #include "ui/expose.h"
 #include "ui/menu.h"
+#include "ui/stack.h"
 
 namespace dx {
 namespace {
@@ -26,6 +31,9 @@ constexpr UINT_PTR kTimerRescanLate = 2;
 constexpr UINT_PTR kTimerShow = 3;
 constexpr UINT_PTR kTimerHide = 4;
 constexpr UINT_PTR kTimerHold = 5;
+constexpr UINT_PTR kTimerTrash = 6;
+constexpr int kSidStackRecycler = 31;      // SIID_RECYCLER
+constexpr int kSidStackRecyclerFull = 32;  // SIID_RECYCLERFULL
 
 constexpr double kLaunchBouncePeriod = 0.62;
 constexpr double kAttentionBouncePeriod = 0.5;
@@ -38,6 +46,8 @@ constexpr UINT kHoldMs = 500;
 enum : UINT {
     kCmdKeep = 1, kCmdShow, kCmdClose, kCmdForceQuit, kCmdHide, kCmdOpen, kCmdExpose,
     kCmdMagnify, kCmdDark, kCmdAutoHide, kCmdPosLeft, kCmdPosBottom, kCmdPosRight, kCmdHideTaskbar, kCmdQuitDock,
+    kCmdOpenStack, kCmdRemoveStack, kCmdSortName, kCmdSortAdded, kCmdSortModified, kCmdSortKind,
+    kCmdViewFan, kCmdViewGrid, kCmdViewList, kCmdViewAuto, kCmdOpenTrash, kCmdEmptyTrash, kCmdRecent,
     kCmdWindow = 100
 };
 
@@ -108,6 +118,7 @@ Dock::~Dock() {
     if (foregroundHook_) UnhookWinEvent(foregroundHook_);
     if (hwnd_) RevokeDragDrop(hwnd_);
     if (edgeWnd_) RevokeDragDrop(edgeWnd_);
+    if (shellNotify_) SHChangeNotifyDeregister(shellNotify_);
     icons_.Stop();
     clock_.Shutdown();
     RestoreTaskbar();
@@ -187,6 +198,15 @@ bool Dock::Create(HINSTANCE instance) {
     foregroundHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, WinEventProc, 0, 0,
                                       WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     RegisterDropTargets();
+
+    // Watch the Recycle Bin so its icon shows empty / full.
+    PIDLIST_ABSOLUTE bin = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderIDList(FOLDERID_RecycleBinFolder, 0, nullptr, &bin))) {
+        SHChangeNotifyEntry entry{bin, TRUE};
+        shellNotify_ = SHChangeNotifyRegister(hwnd_, SHCNRF_ShellLevel | SHCNRF_InterruptLevel | SHCNRF_NewDelivery,
+                                              SHCNE_ALLEVENTS, WM_APP_SHELL, 1, &entry);
+        CoTaskMemFree(bin);
+    }
     StartWatchdog(hwnd_);
     Log(L"DockX started: %d items, scale %.2f, edge %S", static_cast<int>(items_.size()), m_.scale, cfg_.position.c_str());
     return true;
@@ -364,6 +384,8 @@ void Dock::ApplyTheme() {
 
     const auto dotBrush = c.CreateColorBrush(dark ? Rgba(255, 255, 255, 210) : Rgba(0, 0, 0, 170));
     for (auto& it : items_) it->dotVisual.Brush(dotBrush);
+    const auto sepBrush = c.CreateColorBrush(dark ? Rgba(255, 255, 255, 60) : Rgba(0, 0, 0, 45));
+    for (auto& s : separators_) s.Brush(sepBrush);
 
     labelFormat_ = nullptr;
     if (SUCCEEDED(gfx_.DWrite()->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
@@ -395,23 +417,159 @@ void Dock::Rebuild(bool forceBar) {
 // ---------------------------------------------------------------- Items
 
 void Dock::LoadPinned() {
+    bool save = false;
     if (!cfg_.pinnedInitialized) {
         cfg_.pinned = DefaultPinnedApps();
         cfg_.pinnedInitialized = true;
-        SaveConfig(cfg_);
+        save = true;
     }
+    if (!cfg_.stacksInitialized) {
+        if (const std::wstring dl = DownloadsFolder(); !dl.empty()) cfg_.stacks.push_back(dl);
+        cfg_.stacksInitialized = true;
+        save = true;
+    }
+    if (save) SaveConfig(cfg_);
+
     for (const auto& p : cfg_.pinned) AddItem(true, p.path, p.aumid, false);
+    if (cfg_.showRecent) {
+        // Most recent first; older ones get a smaller timestamp.
+        const ULONGLONG now = GetTickCount64();
+        ULONGLONG age = 1;
+        for (const auto& r : cfg_.recent) {
+            const bool dup = std::any_of(items_.begin(), items_.end(), [&](const auto& it) {
+                return (!r.path.empty() && Lower(it->path) == Lower(r.path)) || (!r.aumid.empty() && Lower(it->aumid) == Lower(r.aumid));
+            });
+            if (dup) continue;
+            AddItem(false, r.path, r.aumid, false).lastUsed = now > age ? now - age : 0;
+            ++age;
+        }
+    }
+    for (const auto& s : cfg_.stacks) AddItem(false, s, L"", false, DockItem::Kind::Stack);
+    if (cfg_.showTrash) AddItem(false, L"", L"", false, DockItem::Kind::Trash);
 }
 
-DockItem& Dock::AddItem(bool pinned, std::wstring path, std::wstring aumid, bool animate) {
+int Dock::Section(const DockItem& it) const {
+    if (it.kind != DockItem::Kind::App) return 2;
+    return it.pinned ? 0 : 1;
+}
+
+// Applies a change to the item order; items that moved glide from where they were.
+void Dock::ChangeOrder(const std::function<void()>& change) {
+    std::unordered_map<int, double> before;
+    std::vector<int> oldIds;
+    for (const auto& it : items_) {
+        before[it->id] = it->cu;
+        oldIds.push_back(it->id);
+    }
+    change();
+    bool moved = oldIds.size() != items_.size();
+    for (size_t i = 0; !moved && i < items_.size(); ++i) moved = oldIds[i] != items_[i]->id;
+    if (!moved) return;
+    std::vector<int> itemEntry;
+    const LayoutResult after = ComputeCurrentLayout(nullptr, &itemEntry);
+    for (size_t i = 0; i < items_.size(); ++i) {
+        DockItem& it = *items_[i];
+        const auto old = before.find(it.id);
+        // Skip the dragged icon and icons that were never on screen (they grow in instead).
+        if (old == before.end() || (dragging_ && it.id == pressedId_) || itemEntry[i] < 0 || it.size == 0) continue;
+        it.shiftU.value = old->second - after.center[itemEntry[i]];
+        it.shiftU.target = 0;
+    }
+    StartAnimating();
+}
+
+// Pinned apps, then other apps, then stacks, with the Recycle Bin last.
+void Dock::NormalizeOrder() {
+    if (dragging_) return;
+    ChangeOrder([this] {
+        std::stable_sort(items_.begin(), items_.end(), [this](const auto& a, const auto& b) {
+            const int ka = Section(*a) * 2 + (a->kind == DockItem::Kind::Trash ? 1 : 0);
+            const int kb = Section(*b) * 2 + (b->kind == DockItem::Kind::Trash ? 1 : 0);
+            return ka < kb;
+        });
+    });
+}
+
+void Dock::UpdateTrash() {
+    const bool full = IsRecycleBinFull();
+    for (auto& it : items_) {
+        if (it->kind != DockItem::Kind::Trash) continue;
+        const std::wstring source = L"stock:" + std::to_wstring(full ? kSidStackRecyclerFull : kSidStackRecycler);
+        if (source == it->iconSource && full == trashFull_) return;
+        it->iconSource = source;
+        RequestIcon(*it);
+    }
+    trashFull_ = full;
+}
+
+// Keeps at most `recentCount` closed apps in the recent section.
+void Dock::TrimRecent() {
+    std::vector<DockItem*> closed;
+    for (auto& it : items_)
+        if (it->kind == DockItem::Kind::App && !it->pinned && !it->removing && it->windows.empty()) closed.push_back(it.get());
+    std::sort(closed.begin(), closed.end(), [](const DockItem* a, const DockItem* b) { return a->lastUsed > b->lastUsed; });
+    const size_t keep = cfg_.showRecent ? static_cast<size_t>(cfg_.recentCount) : 0;
+    for (size_t i = keep; i < closed.size(); ++i) {
+        closed[i]->removing = true;
+        closed[i]->presence.target = 0;
+    }
+}
+
+void Dock::SaveRecent() {
+    std::vector<const DockItem*> list;
+    for (const auto& it : items_)
+        if (it->kind == DockItem::Kind::App && !it->pinned && !it->removing) list.push_back(it.get());
+    std::sort(list.begin(), list.end(), [](const DockItem* a, const DockItem* b) { return a->lastUsed > b->lastUsed; });
+    std::vector<PinnedItem> recent;
+    for (const DockItem* it : list) {
+        if (static_cast<int>(recent.size()) >= cfg_.recentCount) break;
+        recent.push_back({it->path, it->aumid});
+    }
+    const bool same = recent.size() == cfg_.recent.size() &&
+                      std::equal(recent.begin(), recent.end(), cfg_.recent.begin(), [](const PinnedItem& a, const PinnedItem& b) {
+                          return a.path == b.path && a.aumid == b.aumid;
+                      });
+    if (same) return;
+    cfg_.recent = std::move(recent);
+    SaveConfig(cfg_);
+}
+
+void Dock::SaveStacks() {
+    cfg_.stacks.clear();
+    for (const auto& it : items_)
+        if (it->kind == DockItem::Kind::Stack && !it->removing) cfg_.stacks.push_back(it->path);
+    cfg_.stacksInitialized = true;
+    SaveConfig(cfg_);
+}
+
+void Dock::ShowStack(int itemId) {
+    DockItem* it = FindItem(itemId);
+    if (!it) return;
+    StackOptions o;
+    o.folder = it->path;
+    o.view = cfg_.stackView;
+    o.sort = cfg_.stackSort;
+    o.icon = ItemScreenRect(*it);
+    o.edge = edge_;
+    o.dark = Dark();
+    o.scale = m_.scale;
+    BeforePopup();
+    StackView::Run(gfx_, o);
+    AfterPopup();
+}
+
+DockItem& Dock::AddItem(bool pinned, std::wstring path, std::wstring aumid, bool animate, DockItem::Kind kind) {
     auto item = std::make_unique<DockItem>();
     DockItem& it = *item;
     it.id = nextId_++;
-    it.pinned = pinned;
+    it.kind = kind;
+    it.pinned = pinned && kind == DockItem::Kind::App;
     it.path = std::move(path);
     it.aumid = std::move(aumid);
 
-    if (EndsWith(it.path, L".lnk")) {
+    if (kind != DockItem::Kind::App) {
+        // Stacks and the Recycle Bin never match app windows.
+    } else if (EndsWith(it.path, L".lnk")) {
         const ShortcutInfo sc = ReadShortcut(it.path);
         it.matchExe = Lower(sc.target);
         if (it.aumid.empty()) it.aumid = sc.aumid;
@@ -420,6 +578,12 @@ DockItem& Dock::AddItem(bool pinned, std::wstring path, std::wstring aumid, bool
     }
     it.matchAumid = Lower(it.aumid);
     it.iconSource = !it.path.empty() ? it.path : L"shell:AppsFolder\\" + it.aumid;
+    if (kind == DockItem::Kind::Trash) {
+        trashFull_ = IsRecycleBinFull();
+        it.iconSource = L"stock:" + std::to_wstring(trashFull_ ? kSidStackRecyclerFull : kSidStackRecycler);
+        it.name = Tr(Text::RecycleBin);
+    }
+    it.lastUsed = GetTickCount64();
 
     it.presence.damping = 1.0;
     it.presence.response = 0.35;
@@ -505,35 +669,32 @@ int Dock::IndexOf(int id) const {
 // Moves an item in the list; the others glide to their new places from where they are now.
 void Dock::Reorder(int from, int to) {
     if (from == to || from < 0 || to < 0) return;
-    std::unordered_map<int, double> before;
-    for (const auto& it : items_) before[it->id] = it->cu;
-    auto moved = std::move(items_[from]);
-    items_.erase(items_.begin() + from);
-    items_.insert(items_.begin() + to, std::move(moved));
-    const LayoutResult after = ComputeCurrentLayout();
-    for (size_t i = 0; i < items_.size() && i < after.center.size(); ++i) {
-        DockItem& it = *items_[i];
-        if (dragging_ && it.id == pressedId_) continue;
-        it.shiftU.value = before[it.id] - after.center[i];
-        it.shiftU.target = 0;
-    }
-    StartAnimating();
+    ChangeOrder([&] {
+        auto moved = std::move(items_[from]);
+        items_.erase(items_.begin() + from);
+        items_.insert(items_.begin() + to, std::move(moved));
+    });
 }
 
+// Adds an app (exe / shortcut) or a folder (as a Stack) dropped on the dock.
 void Dock::PinAt(const std::wstring& path, double u) {
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    const bool folder = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
     for (const auto& it : items_)
-        if (it->pinned && Lower(it->path) == Lower(path)) return;  // already in the dock
+        if (Lower(it->path) == Lower(path) && (folder ? it->kind == DockItem::Kind::Stack : it->pinned)) return;  // already there
     int index = static_cast<int>(items_.size());
-    for (size_t i = 0; i < layout_.center.size() && i < items_.size(); ++i)
-        if (u < layout_.center[i]) {
+    for (size_t i = 0; i < items_.size() && i < itemEntry_.size(); ++i)
+        if (itemEntry_[i] >= 0 && u < layout_.center[itemEntry_[i]]) {
             index = static_cast<int>(i);
             break;
         }
-    AddItem(true, path, L"", true);
+    AddItem(!folder, path, L"", true, folder ? DockItem::Kind::Stack : DockItem::Kind::App);
     auto added = std::move(items_.back());
     items_.pop_back();
     items_.insert(items_.begin() + index, std::move(added));
-    SavePinned();
+    NormalizeOrder();
+    if (folder) SaveStacks();
+    else SavePinned();
     ScheduleRescan(false);
     StartAnimating();
 }
@@ -559,22 +720,28 @@ void Dock::Rescan() {
         target->windows.push_back(w.hwnd);
     }
 
+    const ULONGLONG now = GetTickCount64();
     for (auto& it : items_) {
+        if (it->kind != DockItem::Kind::App) continue;
         const bool running = !it->windows.empty();
         it->dot.target = running ? 1 : 0;
         if (!initialized_) it->dot.Snap();
         if (dragging_ && it->id == pressedId_) continue;  // the drag decides about this one
         if (running) {
+            it->lastUsed = now;
             if (it->removing) {
                 it->removing = false;
                 it->presence.target = 1;
             }
             if (it->bouncing && !it->attention) it->stopBounce = true;
-        } else if (!it->pinned && !it->removing) {
+        } else if (!it->pinned && !it->removing && !cfg_.showRecent) {
             it->removing = true;
             it->presence.target = 0;
         }
     }
+    TrimRecent();  // closed apps stay in the recent section (up to recentCount)
+    NormalizeOrder();
+    SaveRecent();
     initialized_ = true;
     StartAnimating();
 }
@@ -587,17 +754,22 @@ void Dock::ScheduleRescan(bool alsoLate) {
 void Dock::SavePinned() {
     cfg_.pinned.clear();
     for (const auto& it : items_)
-        if (it->pinned && !it->removing) cfg_.pinned.push_back({it->path, it->aumid});
+        if (it->kind == DockItem::Kind::App && it->pinned && !it->removing) cfg_.pinned.push_back({it->path, it->aumid});
     cfg_.pinnedInitialized = true;
     SaveConfig(cfg_);
 }
 
 // ---------------------------------------------------------------- Interaction
 
-int Dock::HitTest(double u) const {
-    const size_t n = std::min(items_.size(), layout_.slotLeft.size());
-    for (size_t i = 0; i < n; ++i)
-        if (u >= layout_.slotLeft[i] && u < layout_.slotRight[i]) return static_cast<int>(i);
+int Dock::HitTest(double u, bool* separator) const {
+    if (separator) *separator = false;
+    const size_t n = std::min(entryItem_.size(), layout_.slotLeft.size());
+    for (size_t e = 0; e < n; ++e) {
+        if (u < layout_.slotLeft[e] || u >= layout_.slotRight[e]) continue;
+        const int item = entryItem_[e];
+        if (item < 0 && separator) *separator = true;
+        return item < static_cast<int>(items_.size()) ? item : -1;
+    }
     return -1;
 }
 
@@ -615,9 +787,12 @@ void Dock::OnMouseMove(int x, int y) {
         return;
     }
     if (pressedId_ && std::hypot(x - pressX_, y - pressY_) > 6 * m_.scale) {
-        BeginDrag();
-        DragMove();
-        return;
+        const DockItem* pressed = FindItem(pressedId_);
+        if (pressed && pressed->kind != DockItem::Kind::Trash) {  // the Recycle Bin stays put
+            BeginDrag();
+            DragMove();
+            return;
+        }
     }
 
     const double u = mouseU_, v = mouseV_;
@@ -626,8 +801,8 @@ void Dock::OnMouseMove(int x, int y) {
     if (!hovering_) {
         const bool inShelf = hide_.target == 0 && u >= shelfLeft_ && u <= shelfRight_ && v >= 0 && v <= m_.margin + m_.shelfH;
         if (!inShelf) return;
-        Log(L"enter u=%.0f v=%.0f", u, v);
         hovering_ = true;
+        UpdateTrash();
         KillTimer(hwnd_, kTimerHide);
         magnify_.target = cfg_.magnification ? 1 : 0;
         UpdateRegion();
@@ -707,7 +882,9 @@ void Dock::OnRightUp() {
     RefreshHover();
     if (!hovering_) return;
     // The strip under the icons (where the dots are) counts as the dock itself.
-    const bool onIcon = hoverId_ && mouseV_ >= m_.iconNear - 2 * m_.scale;
+    bool onSeparator = false;
+    HitTest(mouseU_, &onSeparator);
+    const bool onIcon = hoverId_ && !onSeparator && mouseV_ >= m_.iconNear - 2 * m_.scale;
     try {
         if (onIcon) ShowItemMenu(hoverId_);
         else ShowDockMenu();
@@ -731,6 +908,14 @@ void Dock::OnHoldTimer() {
 }
 
 void Dock::Activate(DockItem& it) {
+    if (it.kind == DockItem::Kind::Stack) {
+        ShowStack(it.id);
+        return;
+    }
+    if (it.kind == DockItem::Kind::Trash) {
+        OpenRecycleBin();
+        return;
+    }
     if (!it.windows.empty()) {
         const HWND w = it.windows.front();
         if (GetForegroundWindow() == w && !IsIconic(w)) return;  // macOS: clicking the active app does nothing
@@ -782,6 +967,70 @@ void Dock::ShowItemMenu(int itemId) {
     if (!it) return;
     const bool shift = GetKeyState(VK_SHIFT) < 0;
     const MenuSide side = edge_ == Edge::Left ? MenuSide::Right : edge_ == Edge::Right ? MenuSide::Left : MenuSide::Above;
+
+    if (it->kind != DockItem::Kind::App) {
+        std::vector<MenuItem> items;
+        if (it->kind == DockItem::Kind::Trash) {
+            items.push_back(Item(Tr(Text::Open), kCmdOpenTrash));
+            items.push_back(MenuItem::Separator());
+            MenuItem empty = Item(Tr(Text::EmptyRecycleBin), kCmdEmptyTrash);
+            empty.disabled = !IsRecycleBinFull();
+            items.push_back(empty);
+        } else {
+            const std::wstring open = std::wstring(Tr(Text::Open)) + L" “" + (it->name.empty() ? it->path : it->name) + L"”";
+            items.push_back(Item(open.c_str(), kCmdOpenStack));
+            items.push_back(MenuItem::Separator());
+            MenuItem sort = Item(Tr(Text::SortBy), 0);
+            sort.sub.push_back(Item(Tr(Text::SortName), kCmdSortName, cfg_.stackSort == "name"));
+            sort.sub.push_back(Item(Tr(Text::SortDateAdded), kCmdSortAdded, cfg_.stackSort == "dateAdded"));
+            sort.sub.push_back(Item(Tr(Text::SortDateModified), kCmdSortModified, cfg_.stackSort == "dateModified"));
+            sort.sub.push_back(Item(Tr(Text::SortKind), kCmdSortKind, cfg_.stackSort == "kind"));
+            items.push_back(sort);
+            MenuItem view = Item(Tr(Text::ViewContentAs), 0);
+            view.sub.push_back(Item(Tr(Text::ViewFan), kCmdViewFan, cfg_.stackView == "fan"));
+            view.sub.push_back(Item(Tr(Text::ViewGrid), kCmdViewGrid, cfg_.stackView == "grid"));
+            view.sub.push_back(Item(Tr(Text::ViewList), kCmdViewList, cfg_.stackView == "list"));
+            view.sub.push_back(Item(Tr(Text::ViewAuto), kCmdViewAuto, cfg_.stackView == "auto"));
+            items.push_back(view);
+            items.push_back(MenuItem::Separator());
+            MenuItem options = Item(Tr(Text::Options), 0);
+            options.sub.push_back(Item(Tr(Text::RemoveFromDock), kCmdRemoveStack));
+            options.sub.push_back(Item(Tr(Text::ShowInExplorer), kCmdShow));
+            items.push_back(options);
+        }
+        const POINT anchor = ItemAnchor(*it);
+        BeforePopup();
+        const UINT cmd = MacMenu::Run(gfx_, items, anchor, side, Dark(), m_.scale);
+        AfterPopup();
+        it = FindItem(itemId);
+        if (!it || !cmd) return;
+        auto setStack = [this](std::string& field, const char* value) {
+            field = value;
+            SaveConfig(cfg_);
+        };
+        switch (cmd) {
+            case kCmdOpenTrash: OpenRecycleBin(); break;
+            case kCmdEmptyTrash: EmptyRecycleBin(hwnd_); break;
+            case kCmdOpenStack: OpenPath(it->path); break;
+            case kCmdShow: ShowInExplorer(it->path); break;
+            case kCmdRemoveStack:
+                it->removing = true;
+                it->presence.target = 0;
+                SaveStacks();
+                StartAnimating();
+                break;
+            case kCmdSortName: setStack(cfg_.stackSort, "name"); break;
+            case kCmdSortAdded: setStack(cfg_.stackSort, "dateAdded"); break;
+            case kCmdSortModified: setStack(cfg_.stackSort, "dateModified"); break;
+            case kCmdSortKind: setStack(cfg_.stackSort, "kind"); break;
+            case kCmdViewFan: setStack(cfg_.stackView, "fan"); break;
+            case kCmdViewGrid: setStack(cfg_.stackView, "grid"); break;
+            case kCmdViewList: setStack(cfg_.stackView, "list"); break;
+            case kCmdViewAuto: setStack(cfg_.stackView, "auto"); break;
+            default: break;
+        }
+        return;
+    }
 
     std::vector<MenuItem> items;
     std::vector<std::wstring> titles;
@@ -847,6 +1096,7 @@ void Dock::ShowDockMenu() {
     pos.sub.push_back(Item(Tr(Text::PositionRight), kCmdPosRight, edge_ == Edge::Right));
     items.push_back(pos);
     items.push_back(MenuItem::Separator());
+    items.push_back(Item(Tr(Text::ShowRecent), kCmdRecent, cfg_.showRecent));
     items.push_back(Item(Tr(Text::HideTaskbar), kCmdHideTaskbar, cfg_.hideTaskbar));
     items.push_back(Item(Tr(Text::DarkTheme), kCmdDark, Dark()));
     items.push_back(MenuItem::Separator());
@@ -887,6 +1137,13 @@ void Dock::ShowDockMenu() {
             cfg_.hideTaskbar = !cfg_.hideTaskbar;
             SaveConfig(cfg_);
             ApplyTaskbarSetting();
+            break;
+        case kCmdRecent:
+            cfg_.showRecent = !cfg_.showRecent;
+            SaveConfig(cfg_);
+            TrimRecent();
+            NormalizeOrder();
+            StartAnimating();
             break;
         case kCmdQuitDock:
             DestroyWindow(hwnd_);
@@ -955,6 +1212,7 @@ void Dock::BeginDrag() {
     KillTimer(hwnd_, kTimerHold);
     dragging_ = true;
     dragOutside_ = false;
+    dragWasPinned_ = it->pinned;
     hovering_ = true;
     it->dim.Opacity(0);
 
@@ -1008,7 +1266,22 @@ void Dock::DragMove() {
     if (!outside) {
         const int target = HitTest(u);
         const int from = IndexOf(it->id);
-        if (target >= 0 && target != from) Reorder(from, target);
+        // Apps move among apps, stacks among stacks; the Recycle Bin stays last.
+        const bool sameGroup = target >= 0 && (it->kind == DockItem::Kind::App
+                                                   ? items_[target]->kind == DockItem::Kind::App
+                                                   : items_[target]->kind == DockItem::Kind::Stack);
+        if (sameGroup && target != from) {
+            Reorder(from, target);
+            if (it->kind == DockItem::Kind::App) {
+                // Next to pinned apps it becomes pinned; past them it is a recent app again.
+                const int at = IndexOf(it->id);
+                const DockItem* prev = at > 0 ? items_[at - 1].get() : nullptr;
+                const DockItem* next = at + 1 < static_cast<int>(items_.size()) ? items_[at + 1].get() : nullptr;
+                const bool nextPinned = next && next->kind == DockItem::Kind::App && next->pinned;
+                const bool prevPinned = prev && prev->kind == DockItem::Kind::App && prev->pinned;
+                it->pinned = nextPinned || (prevPinned && (dragWasPinned_ || !cfg_.showRecent));
+            }
+        }
     }
     ApplyLayout();
     StartAnimating();
@@ -1027,33 +1300,39 @@ void Dock::EndDrag() {
     double gu = 0, gv = 0;
     ToDock(edge_, mouseX_ - grabX_ + dragSize_ / 2, mouseY_ - grabY_ + dragSize_ / 2, m_.winW, m_.winH, gu, gv);
     const double ghostNear = gv - dragSize_ / 2;
-    const int idx = IndexOf(it->id);
+    const int id = it->id;
 
-    auto flyBack = [&] {
+    bool fly = true;
+    if (dragOutside_) {
+        it->pinned = false;
+        if (it->kind == DockItem::Kind::Stack || it->windows.empty()) {
+            it->removing = true;  // gone from the dock, with a poof
+            it->presence.target = 0;
+            StartPoof();
+            fly = false;
+        } else {
+            it->presence.target = 1;  // a running app stays, as a recent app
+        }
+    }
+    dragOutside_ = false;
+    dragging_ = false;
+    NormalizeOrder();
+    if (fly) {
         // The icon glides from where it was dropped into its slot.
-        if (idx >= 0 && idx < static_cast<int>(layout_.center.size())) {
-            it->shiftU.value = gu - layout_.center[idx];
+        std::vector<int> itemEntry;
+        const LayoutResult now = ComputeCurrentLayout(nullptr, &itemEntry);
+        const int idx = IndexOf(id);
+        if (idx >= 0 && itemEntry[idx] >= 0) {
+            it->shiftU.value = gu - now.center[itemEntry[idx]];
             it->shiftV.value = ghostNear - m_.iconNear;
         }
         ghost_.Hide();
-    };
-
-    if (dragOutside_) {
-        it->pinned = false;
-        if (it->windows.empty()) {
-            it->removing = true;
-            it->presence.target = 0;
-            StartPoof();
-        } else {
-            it->presence.target = 1;
-            flyBack();
-        }
-    } else {
-        it->pinned = true;  // dragging an app into the dock keeps it there
-        flyBack();
     }
-    dragOutside_ = false;
-    SavePinned();
+    if (it->kind == DockItem::Kind::Stack) SaveStacks();
+    else {
+        SavePinned();
+        SaveRecent();
+    }
     magnify_.target = cfg_.magnification ? 1 : 0;
     OnMouseMove(mouseX_, mouseY_);  // decides whether we are still hovering
     StartAnimating();
@@ -1121,6 +1400,13 @@ DWORD Dock::DropOver(POINT screen) {
     SetDropHighlight(it ? it->id : 0);
     hoverId_ = it ? it->id : 0;
     UpdateLabel();
+    if (it && it->kind == DockItem::Kind::Trash) return DROPEFFECT_MOVE;  // to the Recycle Bin
+    if (it && it->kind == DockItem::Kind::Stack) {
+        // Into the folder: move on the same drive, copy otherwise (like Explorer).
+        const bool sameDrive = !dropFiles_.empty() && PathGetDriveNumberW(dropFiles_[0].c_str()) >= 0 &&
+                               PathGetDriveNumberW(dropFiles_[0].c_str()) == PathGetDriveNumberW(it->path.c_str());
+        return sameDrive ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+    }
     if (it) return DROPEFFECT_COPY;                    // open the files with this app
     if (CanPin(dropFiles_)) return DROPEFFECT_LINK;    // add the app/folder to the dock
     return DROPEFFECT_NONE;
@@ -1135,8 +1421,13 @@ void Dock::DropLeave() {
 DWORD Dock::DropFiles(const std::vector<std::wstring>& files, POINT screen) {
     dropFiles_ = files;
     const DWORD effect = DropOver(screen);
-    if (effect == DROPEFFECT_COPY) {
-        if (DockItem* it = FindItem(dropHighlightId_)) {
+    DockItem* target = FindItem(dropHighlightId_);
+    if (target && target->kind == DockItem::Kind::Trash) {
+        RecycleFiles(files);
+    } else if (target && target->kind == DockItem::Kind::Stack) {
+        CopyOrMoveInto(target->path, files);
+    } else if (effect == DROPEFFECT_COPY) {
+        if (DockItem* it = target) {
             const std::wstring exe = !it->matchExe.empty() ? it->matchExe : it->path;
             OpenFilesWith(exe, it->path.empty() ? it->aumid : L"", files);
             if (it->windows.empty() && cfg_.launchBounce) StartBounce(*it, false);
@@ -1213,10 +1504,9 @@ void Dock::RestoreTaskbar() {
 }
 
 void Dock::RestShelfSpan(double& left, double& right) const {
-    double total = 0;
-    for (const auto& it : items_) total += (m_.icon + m_.gap) * std::clamp(it->presence.target, 0.0, 1.0);
-    left = m_.axis / 2 - total / 2 + m_.gap / 2 - m_.padSide;
-    right = m_.axis / 2 + total / 2 - m_.gap / 2 + m_.padSide;
+    const LayoutResult rest = ComputeCurrentLayout(nullptr, nullptr, true);
+    left = rest.start + m_.gap / 2 - m_.padSide;
+    right = rest.end - m_.gap / 2 + m_.padSide;
 }
 
 void Dock::PlaceEdgeTrigger() {
@@ -1332,23 +1622,44 @@ bool Dock::StepAnimations(double dt) {
     return active;
 }
 
-LayoutResult Dock::ComputeCurrentLayout() const {
-    std::vector<double> presence;
-    presence.reserve(items_.size());
-    for (const auto& it : items_) presence.push_back(it->presence.value);
+// Builds the slots (icons + separators between sections) and lays them out.
+// `rest` = no magnification, final presence (used for the resting dock size).
+LayoutResult Dock::ComputeCurrentLayout(std::vector<int>* entryItem, std::vector<int>* itemEntry, bool rest) const {
+    std::vector<LayoutEntry> entries;
+    std::vector<int> e2i;
+    std::vector<int> i2e(items_.size(), -1);
+    double sectionPresence[3] = {0, 0, 0};
+    for (const auto& it : items_)
+        sectionPresence[Section(*it)] = std::max(sectionPresence[Section(*it)], rest ? it->presence.target : it->presence.value);
+    int prev = -1;
+    for (size_t i = 0; i < items_.size(); ++i) {
+        const DockItem& it = *items_[i];
+        const int sec = Section(it);
+        if (prev >= 0 && sec != prev && (sec == 2 || (prev == 0 && cfg_.showRecent))) {
+            entries.push_back({std::min(sectionPresence[prev], sectionPresence[sec]), true});
+            e2i.push_back(-1);
+        }
+        i2e[i] = static_cast<int>(entries.size());
+        entries.push_back({rest ? it.presence.target : it.presence.value, false});
+        e2i.push_back(static_cast<int>(i));
+        prev = sec;
+    }
     LayoutParams p;
     p.iconSize = m_.icon;
     p.gap = m_.gap;
     p.maxScale = m_.maxIcon / m_.icon;
     p.range = cfg_.magnificationRange;
-    p.amount = magnify_.value;
+    p.amount = rest ? 0 : magnify_.value;
     p.mouseX = mouseU_;
     p.centerX = m_.axis / 2.0;
-    return ComputeLayout(presence, p);
+    p.separatorWidth = std::round(14 * m_.scale);
+    if (entryItem) *entryItem = std::move(e2i);
+    if (itemEntry) *itemEntry = std::move(i2e);
+    return ComputeLayout(entries, p);
 }
 
 void Dock::ApplyLayout() {
-    layout_ = ComputeCurrentLayout();
+    layout_ = ComputeCurrentLayout(&entryItem_, &itemEntry_);
 
     if (items_.empty()) {
         shelfLeft_ = m_.axis / 2.0 - 30 * m_.scale;
@@ -1381,19 +1692,40 @@ void Dock::ApplyLayout() {
         shadow_.Size({w + 2 * e, h + 2 * e});
     }
 
+    // Separator lines between sections.
+    size_t sep = 0;
+    for (size_t e = 0; e < entryItem_.size(); ++e) {
+        if (entryItem_[e] >= 0) continue;
+        if (sep >= separators_.size()) {
+            auto v = gfx_.Comp().CreateSpriteVisual();
+            v.Brush(gfx_.Comp().CreateColorBrush(Dark() ? Rgba(255, 255, 255, 60) : Rgba(0, 0, 0, 45)));
+            separators_.push_back(v);
+            dots_.Children().InsertAtTop(v);
+        }
+        auto& v = separators_[sep++];
+        const double len = m_.shelfH - 2 * m_.padFar - 2 * m_.scale;
+        const WinRect sr = Map(layout_.center[e] - 0.5 * m_.scale, m_.margin + (m_.shelfH - len) / 2, m_.scale, len);
+        v.Offset({F(sr.x), F(sr.y), 0});
+        v.Size({F(sr.w), F(sr.h)});
+        v.Opacity(F(std::clamp(layout_.slotRight[e] - layout_.slotLeft[e], 0.0, 14 * m_.scale) / (14 * m_.scale)));
+        v.IsVisible(true);
+    }
+    for (; sep < separators_.size(); ++sep) separators_[sep].IsVisible(false);
+
     const double d = m_.dot;
     for (size_t i = 0; i < items_.size(); ++i) {
         DockItem& it = *items_[i];
         const double pr = std::clamp(it.presence.value, 0.0, 1.0);
-        it.size = layout_.size[i];
-        it.cu = layout_.center[i] + it.shiftU.value;
+        const int e = itemEntry_[i];
+        it.size = layout_.size[e];
+        it.cu = layout_.center[e] + it.shiftU.value;
         const double nearV = m_.iconNear + it.bounceOffset + it.shiftV.value;
         it.reach = nearV + it.size;
         const WinRect ir = Map(it.cu - it.size / 2, nearV, it.size, it.size);
         it.root.Offset({F(ir.x), F(ir.y), 0});
         it.root.Size({F(ir.w), F(ir.h)});
         it.root.Opacity((dragging_ && it.id == pressedId_) ? 0.0f : F(pr));  // the ghost shows it while dragging
-        const WinRect dr = Map(layout_.center[i] - d / 2, m_.margin + m_.padNear / 2 - d / 2, d, d);
+        const WinRect dr = Map(layout_.center[e] - d / 2, m_.margin + m_.padNear / 2 - d / 2, d, d);
         it.dotVisual.Offset({F(dr.x), F(dr.y), 0});
         it.dotVisual.Opacity(cfg_.showDots ? F(it.dot.value * pr) : 0.0f);
     }
@@ -1547,6 +1879,15 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case WM_APP_SHELL: {
+            // Something changed in the Recycle Bin: release the notification, check a moment later.
+            PIDLIST_ABSOLUTE* pidls = nullptr;
+            LONG event = 0;
+            if (HANDLE lock = SHChangeNotification_Lock(reinterpret_cast<HANDLE>(wp), static_cast<DWORD>(lp), &pidls, &event))
+                SHChangeNotification_Unlock(lock);
+            SetTimer(hwnd_, kTimerTrash, 250, nullptr);
+            return 0;
+        }
         case WM_APP_BAR:
             switch (wp) {
                 case ABN_FULLSCREENAPP:
@@ -1602,6 +1943,9 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case kTimerHold:
                     OnHoldTimer();
+                    break;
+                case kTimerTrash:
+                    UpdateTrash();
                     break;
                 default:
                     Rescan();
