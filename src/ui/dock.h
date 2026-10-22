@@ -23,7 +23,8 @@ namespace dx {
 constexpr UINT WM_APP_TICK = WM_APP + 1;
 constexpr UINT WM_APP_ICON = WM_APP + 2;
 constexpr UINT WM_APP_BAR = WM_APP + 3;
-constexpr UINT WM_APP_SHELL = WM_APP + 4;  // Recycle Bin changed
+constexpr UINT WM_APP_SHELL = WM_APP + 4;   // Recycle Bin changed
+constexpr UINT WM_APP_RELOAD = WM_APP + 5;  // DockX Settings saved new settings
 
 // Wakes the UI thread once per compositor frame, only while something animates.
 // When nothing moves, the thread sleeps on an event: 0 % CPU.
@@ -128,6 +129,7 @@ private:
     void BuildShadow();
     void ApplyTheme();
     void Rebuild(bool forceBar);
+    void ReloadConfig();
     void CreateEdgeTrigger(HINSTANCE instance);
     void PlaceEdgeTrigger();
     void RegisterDropTargets();

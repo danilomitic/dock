@@ -45,5 +45,8 @@ std::vector<PinnedItem> DefaultPinnedApps();
 void SetStartWithWindows(bool on);
 // "DockX" in the Start menu and on the desktop.
 void CreateAppShortcuts();
+// "DockX podešavanja" in the Start menu, if the settings app is next to DockX.exe.
+void EnsureSettingsShortcut();
+void OpenSettingsApp();
 
 }  // namespace dx

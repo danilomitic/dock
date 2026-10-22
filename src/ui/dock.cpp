@@ -47,7 +47,7 @@ enum : UINT {
     kCmdKeep = 1, kCmdShow, kCmdClose, kCmdForceQuit, kCmdHide, kCmdOpen, kCmdExpose,
     kCmdMagnify, kCmdDark, kCmdAutoHide, kCmdPosLeft, kCmdPosBottom, kCmdPosRight, kCmdHideTaskbar, kCmdQuitDock,
     kCmdOpenStack, kCmdRemoveStack, kCmdSortName, kCmdSortAdded, kCmdSortModified, kCmdSortKind,
-    kCmdViewFan, kCmdViewGrid, kCmdViewList, kCmdViewAuto, kCmdOpenTrash, kCmdEmptyTrash, kCmdRecent, kCmdStartup,
+    kCmdViewFan, kCmdViewGrid, kCmdViewList, kCmdViewAuto, kCmdOpenTrash, kCmdEmptyTrash, kCmdRecent, kCmdStartup, kCmdSettings,
     kCmdWindow = 100
 };
 
@@ -204,6 +204,7 @@ bool Dock::Create(HINSTANCE instance) {
         cfg_.shortcutsCreated = true;
         SaveConfig(cfg_);
     }
+    EnsureSettingsShortcut();
 
     // Watch the Recycle Bin so its icon shows empty / full.
     PIDLIST_ABSOLUTE bin = nullptr;
@@ -406,6 +407,48 @@ void Dock::ApplyTheme() {
     }
     labelItemId_ = 0;
     label_.IsVisible(false);
+}
+
+// DockX Settings changed the config file: apply everything live.
+void Dock::ReloadConfig() {
+    Config fresh = LoadConfig();
+    // The dock owns its item lists and internal flags; take only the settings.
+    fresh.pinned = cfg_.pinned;
+    fresh.pinnedInitialized = cfg_.pinnedInitialized;
+    fresh.recent = cfg_.recent;
+    fresh.stacks = cfg_.stacks;
+    fresh.stacksInitialized = cfg_.stacksInitialized;
+    fresh.taskbarHiddenByDock = cfg_.taskbarHiddenByDock;
+    fresh.taskbarOriginalState = cfg_.taskbarOriginalState;
+    fresh.shortcutsCreated = cfg_.shortcutsCreated;
+    const Config old = cfg_;
+    cfg_ = fresh;
+
+    EnableFileLog(cfg_.logging);
+    SetLanguage(cfg_.language);
+    if (old.hideTaskbar != cfg_.hideTaskbar) ApplyTaskbarSetting();
+    if (old.startWithWindows != cfg_.startWithWindows) SetStartWithWindows(cfg_.startWithWindows);
+    if (old.showTrash != cfg_.showTrash) {
+        if (cfg_.showTrash) {
+            AddItem(false, L"", L"", true, DockItem::Kind::Trash);
+        } else {
+            for (auto& it : items_)
+                if (it->kind == DockItem::Kind::Trash) {
+                    it->removing = true;
+                    it->presence.target = 0;
+                }
+        }
+    }
+    if (old.language != cfg_.language) {
+        for (auto& it : items_)
+            if (it->kind == DockItem::Kind::Trash) it->name = Tr(Text::RecycleBin);
+    }
+    TrimRecent();
+    fullscreen_ = cfg_.hideInFullscreen && IsFullscreenOnPrimary(hwnd_);
+    Rebuild(true);
+    SetHidden(AutoHideActive() && !hovering_);
+    NormalizeOrder();
+    StartAnimating();
 }
 
 void Dock::Rebuild(bool forceBar) {
@@ -1126,6 +1169,7 @@ void Dock::ShowDockMenu() {
     items.push_back(Item(Tr(Text::DarkTheme), kCmdDark, Dark()));
     items.push_back(Item(Tr(Text::StartWithWindows), kCmdStartup, cfg_.startWithWindows));
     items.push_back(MenuItem::Separator());
+    items.push_back(Item(Tr(Text::Settings), kCmdSettings));
     items.push_back(Item(Tr(Text::QuitDock), kCmdQuitDock));
 
     BeforePopup();
@@ -1175,6 +1219,9 @@ void Dock::ShowDockMenu() {
             TrimRecent();
             NormalizeOrder();
             StartAnimating();
+            break;
+        case kCmdSettings:
+            OpenSettingsApp();
             break;
         case kCmdQuitDock:
             DestroyWindow(hwnd_);
@@ -1925,6 +1972,9 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        case WM_APP_RELOAD:
+            ReloadConfig();
+            return 0;
         case WM_APP_SHELL: {
             // Something changed in the Recycle Bin: release the notification, check a moment later.
             PIDLIST_ABSOLUTE* pidls = nullptr;

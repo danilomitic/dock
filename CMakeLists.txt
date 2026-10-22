@@ -41,6 +41,10 @@ target_link_libraries(DockX PRIVATE dockcore
   d3d11 dxgi d2d1 dwrite dxguid windowscodecs dwmapi shlwapi shell32 ole32 oleaut32
   uuid propsys windowsapp CoreMessaging version shcore)
 
+# The settings window: a separate, small program (only runs while you change settings).
+add_executable(DockX.Settings WIN32 settings/main.cpp src/app.manifest)
+target_link_libraries(DockX.Settings PRIVATE dockcore d2d1 dwrite dwmapi comdlg32 shell32 ole32 windowsapp)
+
 add_executable(dock_tests tests/tests.cpp)
 target_link_libraries(dock_tests PRIVATE dockcore)
 

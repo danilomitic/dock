@@ -13,7 +13,8 @@ A native macOS-style Dock for Windows 11, written in C++20 with Win32 and Window
 | 5. Interaction: drag reorder, drag out to remove ("poof"), drop files on apps, drop apps to pin, mac-style menus, App Exposé | done |
 | 6. Right side: separators, recent apps, Stacks (fan / grid / list), Recycle Bin | done |
 | 7. Animations: minimize effects (Genie, Scale) | next |
-| 8–9 | planned |
+| 8. Settings app (`DockX.Settings.exe`): every option, live preview, presets, import/export, Serbian + English | done |
+| 9. Polish & performance | planned |
 
 Measured on a 1920×1080 / 144 Hz PC: **0 % CPU when idle**, animations at **144 fps**, about **66 MB** private memory.
 

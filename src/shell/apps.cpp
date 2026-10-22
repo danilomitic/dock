@@ -281,6 +281,26 @@ void CreateAppShortcuts() {
     }
 }
 
+namespace {
+std::wstring SettingsExe() {
+    const std::wstring self = SelfPath();
+    return self.substr(0, self.find_last_of(L'\\')) + L"\\DockX.Settings.exe";
+}
+}  // namespace
+
+void EnsureSettingsShortcut() {
+    const std::wstring exe = SettingsExe();
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    PWSTR dir = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &dir))) {
+        const std::wstring lnk = std::wstring(dir) + L"\\DockX podešavanja.lnk";
+        if (GetFileAttributesW(lnk.c_str()) == INVALID_FILE_ATTRIBUTES) MakeShortcut(lnk, exe);
+    }
+    CoTaskMemFree(dir);
+}
+
+void OpenSettingsApp() { LaunchApp(SettingsExe(), L""); }
+
 std::vector<PinnedItem> DefaultPinnedApps() {
     std::vector<PinnedItem> v;
     auto addPath = [&v](const wchar_t* p) {
