@@ -1,68 +1,69 @@
-# Draws the DockX app icon and writes assets\dockx.ico (PNG frames, 16-256 px).
-# Run from anywhere:  powershell -ExecutionPolicy Bypass -File assets\make-icon.ps1
+# Builds the DockX app icon from assets\dockx-logo.png:
+# the DX logo in a black macOS-style rounded square with transparent corners,
+# written as assets\dockx.ico (16-256 px) and assets\dockx.png (256 px preview).
+# Run:  powershell -ExecutionPolicy Bypass -File assets\make-icon.ps1
 Add-Type -AssemblyName System.Drawing
 
-function RoundedRect([float]$x, [float]$y, [float]$w, [float]$h, [float]$r) {
+$logoPath = Join-Path $PSScriptRoot 'dockx-logo.png'
+$logo = [System.Drawing.Bitmap]::FromFile($logoPath)
+
+# Find the logo (everything that is not black) so it can be centered exactly.
+$minX = $logo.Width; $minY = $logo.Height; $maxX = 0; $maxY = 0
+for ($y = 0; $y -lt $logo.Height; $y += 2) {
+    for ($x = 0; $x -lt $logo.Width; $x += 2) {
+        $p = $logo.GetPixel($x, $y)
+        if (($p.R + $p.G + $p.B) -gt 90) {
+            if ($x -lt $minX) { $minX = $x }; if ($x -gt $maxX) { $maxX = $x }
+            if ($y -lt $minY) { $minY = $y }; if ($y -gt $maxY) { $maxY = $y }
+        }
+    }
+}
+$logoW = $maxX - $minX; $logoH = $maxY - $minY
+"logo found at $minX,$minY  ${logoW}x${logoH}"
+
+function Squircle([float]$x, [float]$y, [float]$w, [float]$r) {
     $p = New-Object System.Drawing.Drawing2D.GraphicsPath
     $d = 2 * $r
     $p.AddArc($x, $y, $d, $d, 180, 90)
     $p.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
-    $p.AddArc($x + $w - $d, $y + $h - $d, $d, $d, 0, 90)
-    $p.AddArc($x, $y + $h - $d, $d, $d, 90, 90)
+    $p.AddArc($x + $w - $d, $y + $w - $d, $d, $d, 0, 90)
+    $p.AddArc($x, $y + $w - $d, $d, $d, 90, 90)
     $p.CloseFigure()
     return $p
 }
 
 function DrawIcon([int]$size) {
-    $s = $size / 256.0
     $bmp = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = 'AntiAlias'
     $g.InterpolationMode = 'HighQualityBicubic'
+    $g.PixelOffsetMode = 'HighQuality'
     $g.Clear([System.Drawing.Color]::Transparent)
 
-    # Background: a macOS-style rounded square with a dusk gradient.
-    $bg = RoundedRect (8 * $s) (8 * $s) (240 * $s) (240 * $s) (56 * $s)
-    $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush (New-Object System.Drawing.PointF 0, (8 * $s)), (New-Object System.Drawing.PointF 0, (248 * $s)), ([System.Drawing.Color]::FromArgb(255, 94, 140, 255)), ([System.Drawing.Color]::FromArgb(255, 88, 40, 170))
-    $blend = New-Object System.Drawing.Drawing2D.ColorBlend 3
-    $blend.Colors = @([System.Drawing.Color]::FromArgb(255, 110, 170, 255), [System.Drawing.Color]::FromArgb(255, 120, 90, 230), [System.Drawing.Color]::FromArgb(255, 70, 30, 140))
-    $blend.Positions = @(0.0, 0.55, 1.0)
-    $grad.InterpolationColors = $blend
-    $g.FillPath($grad, $bg)
-
-    # Soft light at the top.
-    $sb = New-Object System.Drawing.Drawing2D.LinearGradientBrush (New-Object System.Drawing.PointF 0, (6 * $s)), (New-Object System.Drawing.PointF 0, (122 * $s)), ([System.Drawing.Color]::FromArgb(70, 255, 255, 255)), ([System.Drawing.Color]::FromArgb(0, 255, 255, 255))
-    $g.SetClip((New-Object System.Drawing.RectangleF 0, 0, $size, (120 * $s)))
-    $g.FillPath($sb, $bg)
-    $g.ResetClip()
-
-    # The glass dock shelf.
-    $shelf = RoundedRect (30 * $s) (160 * $s) (196 * $s) (56 * $s) (18 * $s)
-    $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(90, 255, 255, 255))), $shelf)
-    $g.DrawPath((New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(140, 255, 255, 255)), ([float](2.5 * $s))), $shelf)
-
-    # App icons on the shelf; the one under the "cursor" is magnified, like the real dock.
-    $apps = @(
-        @{ x = 44;  y = 170; w = 36; c = [System.Drawing.Color]::FromArgb(255, 255, 159, 10) },
-        @{ x = 86;  y = 152; w = 54; c = [System.Drawing.Color]::FromArgb(255, 255, 255, 255) },
-        @{ x = 146; y = 162; w = 44; c = [System.Drawing.Color]::FromArgb(255, 48, 209, 88) },
-        @{ x = 194; y = 174; w = 28; c = [System.Drawing.Color]::FromArgb(255, 255, 69, 120) }
-    )
-    foreach ($a in $apps) {
-        $r = RoundedRect ($a.x * $s) ($a.y * $s) ($a.w * $s) ($a.w * $s) ($a.w * 0.24 * $s)
-        $shadow = RoundedRect ($a.x * $s) (($a.y + 3) * $s) ($a.w * $s) ($a.w * $s) ($a.w * 0.24 * $s)
-        $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(60, 0, 0, 0))), $shadow)
-        $g.FillPath((New-Object System.Drawing.SolidBrush $a.c), $r)
+    # The black rounded square (small icons use a bit more of the canvas so they stay readable).
+    $inset = if ($size -le 32) { $size * 0.02 } else { $size * 0.055 }
+    $side = $size - 2 * $inset
+    $shape = Squircle $inset $inset $side ($side * 0.225)
+    $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 0, 0, 0))), $shape)
+    if ($size -ge 48) {
+        $g.DrawPath((New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(60, 255, 255, 255)), ([float]($size / 256.0))), $shape)
     }
-    # A purple glyph on the big white icon, and the running dot under it.
-    $g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 120, 90, 230))), (100 * $s), (166 * $s), (26 * $s), (26 * $s))
-    $g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(230, 255, 255, 255))), (109 * $s), (209 * $s), (8 * $s), (8 * $s))
 
+    # The logo, centered, about 72 % of the square's width (larger on tiny sizes).
+    $fill = if ($size -le 24) { 0.86 } elseif ($size -le 48) { 0.8 } else { 0.72 }
+    $k = ($side * $fill) / $logoW
+    $dw = $logoW * $k; $dh = $logoH * $k
+    $dx = $inset + ($side - $dw) / 2; $dy = $inset + ($side - $dh) / 2
+    $g.SetClip($shape)
+    $srcRect = New-Object System.Drawing.RectangleF $minX, $minY, $logoW, $logoH
+    $dstRect = New-Object System.Drawing.RectangleF $dx, $dy, $dw, $dh
+    $g.DrawImage($logo, $dstRect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
+    $g.ResetClip()
     $g.Dispose()
     return $bmp
 }
 
-$sizes = @(16, 24, 32, 48, 64, 128, 256)
+$sizes = @(16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 $frames = @()
 foreach ($size in $sizes) {
     $bmp = DrawIcon $size
@@ -72,6 +73,7 @@ foreach ($size in $sizes) {
     if ($size -eq 256) { $bmp.Save((Join-Path $PSScriptRoot 'dockx.png'), [System.Drawing.Imaging.ImageFormat]::Png) }
     $bmp.Dispose()
 }
+$logo.Dispose()
 
 # ICO container with PNG frames.
 $out = New-Object System.IO.MemoryStream
