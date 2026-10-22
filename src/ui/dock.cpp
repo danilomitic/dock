@@ -116,6 +116,9 @@ Dock::~Dock() {
     Log(L"shutdown: start");
     if (cloakHook_) UnhookWinEvent(cloakHook_);
     if (foregroundHook_) UnhookWinEvent(foregroundHook_);
+    if (minimizeHook_) UnhookWinEvent(minimizeHook_);
+    minimizer_.Stop();
+    RestoreMinimizeSetting();
     if (hwnd_) RevokeDragDrop(hwnd_);
     if (edgeWnd_) RevokeDragDrop(edgeWnd_);
     if (shellNotify_) SHChangeNotifyDeregister(shellNotify_);
@@ -197,6 +200,9 @@ bool Dock::Create(HINSTANCE instance) {
                                  WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     foregroundHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, WinEventProc, 0, 0,
                                       WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    minimizeHook_ = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART, nullptr, WinEventProc, 0, 0,
+                                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    ApplyMinimizeSetting();
     RegisterDropTargets();
     SetStartWithWindows(cfg_.startWithWindows);
     if (!cfg_.shortcutsCreated) {
@@ -427,6 +433,8 @@ void Dock::ReloadConfig() {
     EnableFileLog(cfg_.logging);
     SetLanguage(cfg_.language);
     if (old.hideTaskbar != cfg_.hideTaskbar) ApplyTaskbarSetting();
+    cfg_.systemMinAnimChanged = old.systemMinAnimChanged;
+    if (old.minimizeEffect != cfg_.minimizeEffect) ApplyMinimizeSetting();
     if (old.startWithWindows != cfg_.startWithWindows) SetStartWithWindows(cfg_.startWithWindows);
     if (old.showTrash != cfg_.showTrash) {
         if (cfg_.showTrash) {
@@ -987,7 +995,7 @@ void Dock::Activate(DockItem& it) {
     if (!it.windows.empty()) {
         const HWND w = it.windows.front();
         if (GetForegroundWindow() == w && !IsIconic(w)) return;  // macOS: clicking the active app does nothing
-        ActivateWindow(w);
+        RestoreWindow(w);
         return;
     }
     LaunchApp(it.path, it.aumid);
@@ -1145,7 +1153,7 @@ void Dock::ShowItemMenu(int itemId) {
         case kCmdForceQuit: ForceQuitWindows(it->windows); break;
         case kCmdOpen: Activate(*it); break;
         default:
-            if (cmd >= kCmdWindow && cmd - kCmdWindow < it->windows.size()) ActivateWindow(it->windows[cmd - kCmdWindow]);
+            if (cmd >= kCmdWindow && cmd - kCmdWindow < it->windows.size()) RestoreWindow(it->windows[cmd - kCmdWindow]);
             break;
     }
 }
@@ -1589,6 +1597,85 @@ void Dock::ApplyTaskbarSetting() {
     SetTaskbarState(state | ABS_AUTOHIDE);
 }
 
+// ---------------------------------------------------------------- Minimize animation
+
+// DockX draws the minimize animation itself, so the Windows one is turned off
+// while it runs (and turned back on when it quits, even after a crash).
+void Dock::ApplyMinimizeSetting() {
+    const bool ours = ParseMinimizeEffect(cfg_.minimizeEffect) != MinimizeEffect::System;
+    if (ours && !cfg_.systemMinAnimChanged && GetSystemMinimizeAnimation()) {
+        cfg_.systemMinAnimChanged = true;
+        SaveConfig(cfg_);  // saved first, so the watchdog can undo it
+        SetSystemMinimizeAnimation(false);
+    } else if (!ours) {
+        RestoreMinimizeSetting();
+    }
+}
+
+void Dock::RestoreMinimizeSetting() {
+    if (!cfg_.systemMinAnimChanged) return;
+    SetSystemMinimizeAnimation(true);
+    cfg_.systemMinAnimChanged = false;
+    SaveConfig(cfg_);
+}
+
+namespace {
+// Where a window is when it is not minimized, in screen pixels.
+RECT WindowNormalRect(HWND w) {
+    WINDOWPLACEMENT wp{sizeof(wp)};
+    if (!GetWindowPlacement(w, &wp)) return {};
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromRect(&wp.rcNormalPosition, MONITOR_DEFAULTTONEAREST), &mi);
+    if ((wp.flags & WPF_RESTORETOMAXIMIZED) || wp.showCmd == SW_SHOWMAXIMIZED) return mi.rcWork;
+    RECT r = wp.rcNormalPosition;
+    // Placement uses "workspace" coordinates (relative to the work area) except for tool windows.
+    if (!(GetWindowLongPtrW(w, GWL_EXSTYLE) & WS_EX_TOOLWINDOW))
+        OffsetRect(&r, mi.rcWork.left - mi.rcMonitor.left, mi.rcWork.top - mi.rcMonitor.top);
+    return r;
+}
+}  // namespace
+
+// The window flies into its app's icon (or the middle of the dock if it has none).
+RECT Dock::MinimizeTarget(HWND window) const {
+    for (const auto& it : items_)
+        if (std::find(it->windows.begin(), it->windows.end(), window) != it->windows.end()) {
+            RECT r = ItemScreenRect(*it);
+            if (hide_.target == 1) {  // hidden dock: aim at the screen edge
+                const double s = it->size;
+                const WinRect e = Map(it->cu - s / 2, -s, s, s);
+                r = {m_.winX + static_cast<LONG>(e.x), m_.winY + static_cast<LONG>(e.y), m_.winX + static_cast<LONG>(e.x + e.w),
+                     m_.winY + static_cast<LONG>(e.y + e.h)};
+            }
+            return r;
+        }
+    const WinRect c = Map(m_.axis / 2 - m_.icon / 2, m_.iconNear, m_.icon, m_.icon);
+    return {m_.winX + static_cast<LONG>(c.x), m_.winY + static_cast<LONG>(c.y), m_.winX + static_cast<LONG>(c.x + c.w),
+            m_.winY + static_cast<LONG>(c.y + c.h)};
+}
+
+void Dock::OnMinimizeStart(HWND window) {
+    const MinimizeEffect fx = ParseMinimizeEffect(cfg_.minimizeEffect);
+    if (fx == MinimizeEffect::System || !IsWindowVisible(window)) return;
+    const double seconds = (fx == MinimizeEffect::Genie ? 0.55 : 0.32) / cfg_.animationSpeed;
+    if (minimizer_.Start(window, WindowNormalRect(window), MinimizeTarget(window), edge_, fx, seconds, false))
+        StartAnimating();
+}
+
+// Clicking a minimized app in the dock: the window comes back out of its icon first.
+void Dock::RestoreWindow(HWND window) {
+    const MinimizeEffect fx = ParseMinimizeEffect(cfg_.minimizeEffect);
+    if (!IsIconic(window) || fx == MinimizeEffect::System) {
+        ActivateWindow(window);
+        return;
+    }
+    const double seconds = (fx == MinimizeEffect::Genie ? 0.45 : 0.28) / cfg_.animationSpeed;
+    if (minimizer_.Start(window, WindowNormalRect(window), MinimizeTarget(window), edge_, fx, seconds, true,
+                         [window] { ActivateWindow(window); }))
+        StartAnimating();
+    else
+        ActivateWindow(window);
+}
+
 void Dock::RestoreTaskbar() {
     if (!cfg_.taskbarHiddenByDock) return;
     SetTaskbarState(static_cast<UINT>(cfg_.taskbarOriginalState));
@@ -1684,6 +1771,11 @@ bool Dock::StepAnimations(double dt) {
             const double phase = std::fmod(it.bounceTime, period) / period;
             it.bounceOffset = height * 4 * phase * (1 - phase);
         }
+    }
+
+    if (minimizer_.Running()) {
+        active = true;
+        minimizer_.Step(dt);
     }
 
     if (poofTime_ >= 0) {
@@ -1948,6 +2040,10 @@ void CALLBACK Dock::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idO
     if (!g_dock) return;
     if (event == EVENT_SYSTEM_FOREGROUND) {
         g_dock->UpdateFullscreen();
+        return;
+    }
+    if (event == EVENT_SYSTEM_MINIMIZESTART) {
+        if (hwnd && idObject == OBJID_WINDOW) g_dock->OnMinimizeStart(hwnd);
         return;
     }
     if (hwnd && idObject == OBJID_WINDOW && idChild == CHILDID_SELF && GetAncestor(hwnd, GA_ROOT) == hwnd)

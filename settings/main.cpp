@@ -564,7 +564,14 @@ void App::PageAnimation() {
     EndCard();
 
     Header(L(L"POKRET", L"MOTION"));
-    BeginCard(3);
+    BeginCard(4);
+    const std::vector<std::string> effects{"genie", "scale", "system"};
+    const int effect = static_cast<int>(std::find(effects.begin(), effects.end(), cfg_.minimizeEffect) - effects.begin());
+    Choice(L(L"Efekat minimizovanja", L"Minimize effect"), {L"Genie", L(L"Skaliranje", L"Scale"), L"Windows"}, effect,
+           [this, effects](int i) {
+               cfg_.minimizeEffect = effects[i];
+               Changed();
+           });
     Toggle(L(L"Skakutanje pri pokretanju", L"Bounce when opening apps"), cfg_.launchBounce, [this](bool v) {
         cfg_.launchBounce = v;
         Changed();
@@ -868,6 +875,7 @@ void App::Flush() {
     out.taskbarHiddenByDock = cur.taskbarHiddenByDock;
     out.taskbarOriginalState = cur.taskbarOriginalState;
     out.shortcutsCreated = cur.shortcutsCreated;
+    out.systemMinAnimChanged = cur.systemMinAnimChanged;
     out.magnifiedSize = std::max(out.magnifiedSize, out.iconSize);
     dx::SaveConfig(out);
     if (HWND dock = FindDock()) PostMessageW(dock, WM_DOCK_RELOAD, 0, 0);
@@ -898,6 +906,7 @@ void App::ApplyPreset(int preset) {
             cfg_.shadow = false;
             cfg_.launchBounce = false;
             cfg_.attentionBounce = false;
+            cfg_.minimizeEffect = "scale";
             break;
         case 3:  // Large
             cfg_.iconSize = 64;

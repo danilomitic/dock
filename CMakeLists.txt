@@ -19,7 +19,8 @@ add_library(dockcore STATIC
   src/core/config.cpp
   src/core/strings.cpp
   src/core/log.cpp
-  src/ui/layout.cpp)
+  src/ui/layout.cpp
+  src/ui/genie.cpp)
 target_include_directories(dockcore PUBLIC src)
 target_link_libraries(dockcore PUBLIC shell32 ole32)
 
@@ -36,6 +37,7 @@ add_executable(DockX WIN32
   src/ui/menu.cpp
   src/ui/expose.cpp
   src/ui/stack.cpp
+  src/ui/minimize.cpp
   src/app.manifest)
 target_link_libraries(DockX PRIVATE dockcore
   d3d11 dxgi d2d1 dwrite dxguid windowscodecs dwmapi shlwapi shell32 ole32 oleaut32

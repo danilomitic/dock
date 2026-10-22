@@ -7,6 +7,7 @@
 #include "anim/spring.h"
 #include "core/config.h"
 #include "core/json.h"
+#include "ui/genie.h"
 #include "ui/layout.h"
 
 namespace {
@@ -136,6 +137,34 @@ void TestEdges() {
     CHECK(Near(ox, -10));
 }
 
+void TestGenie() {
+    const dx::StripRect from{100, 100, 900, 700};  // a window
+    const dx::StripRect to{480, 1000, 528, 1048};  // a dock icon below it
+    const int n = 40;
+    for (int i = 0; i < n; ++i) {
+        const auto s0 = dx::GenieStrip(from, to, i, n, 0);
+        const auto s1 = dx::GenieStrip(from, to, i, n, 1);
+        CHECK(Near(s0.left, 100) && Near(s0.right, 900));
+        CHECK(Near(s0.top, 100 + 600.0 * i / n));
+        CHECK(Near(s1.left, 480) && Near(s1.right, 528));
+        CHECK(Near(s1.bottom, 1000 + 48.0 * (i + 1) / n));
+    }
+    // Mid-way: strips stay in order, never inverted, and the bottom is narrower than the top.
+    for (double t = 0.1; t < 1; t += 0.1) {
+        for (int i = 0; i + 1 < n; ++i) {
+            const auto a = dx::GenieStrip(from, to, i, n, t);
+            const auto b = dx::GenieStrip(from, to, i + 1, n, t);
+            CHECK(a.right >= a.left && a.bottom >= a.top);
+            CHECK(b.top >= a.top - 1e-9);
+        }
+        const auto top = dx::GenieStrip(from, to, 0, n, t);
+        const auto bottom = dx::GenieStrip(from, to, n - 1, n, t);
+        CHECK(bottom.right - bottom.left <= top.right - top.left + 1e-9);
+    }
+    CHECK(dx::ParseMinimizeEffect("scale") == dx::MinimizeEffect::Scale);
+    CHECK(dx::ParseMinimizeEffect("whatever") == dx::MinimizeEffect::Genie);
+}
+
 void TestSpring() {
     dx::Spring s;
     s.target = 1;
@@ -194,6 +223,7 @@ int main() {
     TestContinuityAcrossSlots();
     TestEdges();
     TestSeparators();
+    TestGenie();
     TestSpring();
     TestJsonAndConfig();
     if (g_failed) {

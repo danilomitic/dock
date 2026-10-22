@@ -29,7 +29,7 @@ std::wstring Lower(std::wstring s) {
 }
 
 namespace {
-bool g_serbian = true;
+bool g_serbian = false;
 }
 
 void SetLanguage(std::string_view lang) { g_serbian = (lang != "en"); }

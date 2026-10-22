@@ -6,6 +6,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "ui/minimize.h"
 
 namespace dx {
 namespace {
@@ -144,13 +145,20 @@ int RunWatchdog(DWORD pid, HWND dock) {
     abd.hWnd = dock;
     SHAppBarMessage(ABM_REMOVE, &abd);
 
-    // Put the taskbar back if the dock had hidden it and could not undo that itself.
+    // Put the taskbar and the Windows minimize animation back if the dock changed them and could not undo it.
     Config cfg = LoadConfig();
+    bool save = false;
     if (cfg.taskbarHiddenByDock) {
         SetTaskbarState(static_cast<UINT>(cfg.taskbarOriginalState));
         cfg.taskbarHiddenByDock = false;
-        SaveConfig(cfg);
+        save = true;
     }
+    if (cfg.systemMinAnimChanged) {
+        SetSystemMinimizeAnimation(true);
+        cfg.systemMinAnimChanged = false;
+        save = true;
+    }
+    if (save) SaveConfig(cfg);
     return 0;
 }
 

@@ -13,7 +13,7 @@ struct PinnedItem {
 
 // All sizes are in DIPs (1/96 inch). Defaults match the macOS Dock.
 struct Config {
-    std::string language = "sr";      // "sr" | "en"
+    std::string language = "en";      // "en" | "sr"
     std::string theme = "dark";       // "dark" | "light"
 
     // Placement and hiding
@@ -46,6 +46,8 @@ struct Config {
 
     bool showDots = true;
     bool showLabels = true;
+    std::string minimizeEffect = "genie";  // "genie" | "scale" | "system"
+    bool systemMinAnimChanged = false;     // internal: we turned the Windows animation off; restore it
     bool launchBounce = true;
     bool attentionBounce = true;
     double animationSpeed = 1.0;      // global multiplier

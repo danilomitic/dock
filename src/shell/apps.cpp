@@ -293,8 +293,9 @@ void EnsureSettingsShortcut() {
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) return;
     PWSTR dir = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &dir))) {
-        const std::wstring lnk = std::wstring(dir) + L"\\DockX podešavanja.lnk";
+        const std::wstring lnk = std::wstring(dir) + L"\\DockX Settings.lnk";
         if (GetFileAttributesW(lnk.c_str()) == INVALID_FILE_ATTRIBUTES) MakeShortcut(lnk, exe);
+        DeleteFileW((std::wstring(dir) + L"\\DockX podešavanja.lnk").c_str());  // name used by older versions
     }
     CoTaskMemFree(dir);
 }

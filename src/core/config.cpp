@@ -88,6 +88,11 @@ Config ParseConfig(std::string_view text) {
     c.shadowOpacity = Clamp(v.Num("shadowOpacity", c.shadowOpacity), 0, 1);
     c.showDots = v.Bool("showDots", c.showDots);
     c.showLabels = v.Bool("showLabels", c.showLabels);
+    {
+        const std::string fx = v.Str("minimizeEffect", c.minimizeEffect);
+        c.minimizeEffect = (fx == "scale" || fx == "system") ? fx : "genie";
+    }
+    c.systemMinAnimChanged = v.Bool("systemMinAnimChanged", c.systemMinAnimChanged);
     c.launchBounce = v.Bool("launchBounce", c.launchBounce);
     c.attentionBounce = v.Bool("attentionBounce", c.attentionBounce);
     c.animationSpeed = Clamp(v.Num("animationSpeed", c.animationSpeed), 0.25, 4);
@@ -162,6 +167,8 @@ std::string SerializeConfig(const Config& c) {
     kv("shadowOpacity", json::Number(c.shadowOpacity));
     kv("showDots", b(c.showDots));
     kv("showLabels", b(c.showLabels));
+    kv("minimizeEffect", json::Quote(c.minimizeEffect));
+    kv("systemMinAnimChanged", b(c.systemMinAnimChanged));
     kv("launchBounce", b(c.launchBounce));
     kv("attentionBounce", b(c.attentionBounce));
     kv("animationSpeed", json::Number(c.animationSpeed));

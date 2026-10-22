@@ -35,7 +35,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         dx::Dock dock;
         if (!dock.Create(instance)) {
             dx::Log(L"DockX failed to start");
-            MessageBoxW(nullptr, L"DockX ne može da se pokrene.", L"DockX", MB_ICONERROR);
+            MessageBoxW(nullptr, L"DockX could not start.", L"DockX", MB_ICONERROR);
             code = 1;
         } else {
             MSG msg;

@@ -16,6 +16,7 @@
 #include "shell/icons.h"
 #include "shell/screen.h"
 #include "ui/layout.h"
+#include "ui/minimize.h"
 #include "ui/popup.h"
 
 namespace dx {
@@ -204,6 +205,13 @@ private:
     void ApplyTaskbarSetting();
     void RestoreTaskbar();
 
+    // Minimize animation
+    void ApplyMinimizeSetting();
+    void RestoreMinimizeSetting();
+    void OnMinimizeStart(HWND window);
+    RECT MinimizeTarget(HWND window) const;
+    void RestoreWindow(HWND window);
+
     // Frame
     void StartAnimating();
     void Tick();
@@ -223,6 +231,8 @@ private:
     UINT taskbarCreatedMsg_ = 0;
     HWINEVENTHOOK cloakHook_ = nullptr;
     HWINEVENTHOOK foregroundHook_ = nullptr;
+    HWINEVENTHOOK minimizeHook_ = nullptr;
+    MinimizeAnimator minimizer_;
 
     Config cfg_;
     Metrics m_;
