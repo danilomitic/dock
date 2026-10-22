@@ -37,6 +37,7 @@ other apps.
 - Bottom, left or right of the screen; reserves screen space like the taskbar (optional)
 - Auto-hide with an invisible edge trigger; hides automatically when an app is fullscreen (games, videos)
 - A **hide button** at the end of the dock and **Ctrl+Alt+D** slide the dock down / keep it shown
+- A **Windows button** at the start of the dock: click for the Start menu, right-click for the Win+X menu
 - Optionally auto-hides the Windows taskbar while it runs
 
 **Safe**

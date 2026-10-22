@@ -56,7 +56,7 @@ private:
 };
 
 struct DockItem {
-    enum class Kind { App, Stack, Trash, Toggle };  // Toggle: the hide/show-the-dock button
+    enum class Kind { App, Stack, Trash, Toggle, Start };  // Toggle: hide/show button; Start: the Windows button
 
     int id = 0;
     Kind kind = Kind::App;
@@ -154,6 +154,8 @@ private:
     void SetIconBitmap(DockItem& it, IWICBitmap* bmp);
     void SetIconSurface(DockItem& it, const wuc::CompositionDrawingSurface& surface);
     void DrawToggleIcon(DockItem& it);
+    void DrawStartIcon(DockItem& it);
+    static void OpenStartMenu(bool powerMenu);
     void ToggleHide();  // the dock button and Ctrl+Alt+D: hide the dock / keep it shown
     void Rescan();
     void ScheduleRescan(bool alsoLate);

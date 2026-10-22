@@ -465,6 +465,17 @@ void Dock::ReloadConfig() {
                 }
         }
     }
+    if (old.showStartButton != cfg_.showStartButton) {
+        if (cfg_.showStartButton) {
+            AddItem(false, L"", L"", true, DockItem::Kind::Start);
+        } else {
+            for (auto& it : items_)
+                if (it->kind == DockItem::Kind::Start) {
+                    it->removing = true;
+                    it->presence.target = 0;
+                }
+        }
+    }
     if (old.showHideButton != cfg_.showHideButton) {
         if (cfg_.showHideButton) {
             AddItem(false, L"", L"", true, DockItem::Kind::Toggle);
@@ -533,9 +544,14 @@ void Dock::LoadPinned() {
     for (const auto& s : cfg_.stacks) AddItem(false, s, L"", false, DockItem::Kind::Stack);
     if (cfg_.showTrash) AddItem(false, L"", L"", false, DockItem::Kind::Trash);
     if (cfg_.showHideButton) AddItem(false, L"", L"", false, DockItem::Kind::Toggle);
+    if (cfg_.showStartButton) {
+        AddItem(false, L"", L"", false, DockItem::Kind::Start);
+        std::rotate(items_.begin(), items_.end() - 1, items_.end());  // first in the dock
+    }
 }
 
 int Dock::Section(const DockItem& it) const {
+    if (it.kind == DockItem::Kind::Start) return 0;  // first, with the pinned apps (like Finder on a Mac)
     if (it.kind != DockItem::Kind::App) return 2;
     return it.pinned ? 0 : 1;
 }
@@ -572,6 +588,7 @@ void Dock::NormalizeOrder() {
         std::stable_sort(items_.begin(), items_.end(), [this](const auto& a, const auto& b) {
             // Within the right side: stacks, then the Recycle Bin, then the hide button.
             auto key = [this](const DockItem& it) {
+                if (it.kind == DockItem::Kind::Start) return -1;  // always the very first icon
                 return Section(it) * 4 + (it.kind == DockItem::Kind::Trash ? 1 : it.kind == DockItem::Kind::Toggle ? 2 : 0);
             };
             return key(*a) < key(*b);
@@ -718,6 +735,10 @@ void Dock::RequestIcon(DockItem& it) {
         DrawToggleIcon(it);
         return;
     }
+    if (it.kind == DockItem::Kind::Start) {
+        DrawStartIcon(it);
+        return;
+    }
     const auto cached = LoadCachedIcon(gfx_.Wic(), it.iconSource);
     if (cached) SetIconBitmap(it, cached.get());
     icons_.Request({it.id, it.iconSource, it.matchExe.empty() ? it.path : it.matchExe, !cached});
@@ -771,6 +792,56 @@ void Dock::DrawToggleIcon(DockItem& it) {
         labelItemId_ = 0;
         UpdateLabel();
     }
+}
+
+// The Windows button: a rounded tile in the Windows blue with the four-pane logo.
+void Dock::DrawStartIcon(DockItem& it) {
+    it.name = L"Start";
+    const int px = static_cast<int>(std::ceil(m_.maxIcon));
+    const auto surface = gfx_.CreateSurface(px, px);
+    gfx_.Draw(surface, [&](ID2D1DeviceContext* dc) {
+        const float s = static_cast<float>(px);
+        const float inset = s * 0.06f, side = s - 2 * inset, r = side * 0.225f;
+        const D2D1_GRADIENT_STOP stops[] = {{0.0f, D2D1::ColorF(0.30f, 0.70f, 1.0f)}, {1.0f, D2D1::ColorF(0.0f, 0.36f, 0.85f)}};
+        winrt::com_ptr<ID2D1GradientStopCollection> collection;
+        dc->CreateGradientStopCollection(stops, 2, collection.put());
+        winrt::com_ptr<ID2D1LinearGradientBrush> tile;
+        dc->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, inset), D2D1::Point2F(0, s - inset)),
+                                      collection.get(), tile.put());
+        dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(inset, inset, s - inset, s - inset), r, r), tile.get());
+        winrt::com_ptr<ID2D1SolidColorBrush> edge, white;
+        dc->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 0.25f), edge.put());
+        dc->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), white.put());
+        dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(inset + 0.5f, inset + 0.5f, s - inset - 0.5f, s - inset - 0.5f), r, r),
+                                 edge.get(), s * 0.012f);
+        // Four panes.
+        const float logo = side * 0.46f, gap = logo * 0.07f, pane = (logo - gap) / 2;
+        const float x0 = (s - logo) / 2, y0 = (s - logo) / 2;
+        for (int i = 0; i < 4; ++i) {
+            const float x = x0 + (i % 2) * (pane + gap), y = y0 + (i / 2) * (pane + gap);
+            dc->FillRectangle(D2D1::RectF(x, y, x + pane, y + pane), white.get());
+        }
+    });
+    SetIconSurface(it, surface);
+}
+
+// Click: the Start menu. Right-click: the Win+X menu (Task Manager, Settings, Shut down…).
+void Dock::OpenStartMenu(bool powerMenu) {
+    std::vector<INPUT> keys;
+    auto key = [&keys](WORD vk, bool up) {
+        INPUT in{};
+        in.type = INPUT_KEYBOARD;
+        in.ki.wVk = vk;
+        in.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+        keys.push_back(in);
+    };
+    key(VK_LWIN, false);
+    if (powerMenu) {
+        key('X', false);
+        key('X', true);
+    }
+    key(VK_LWIN, true);
+    SendInput(static_cast<UINT>(keys.size()), keys.data(), sizeof(INPUT));
 }
 
 void Dock::ToggleHide() {
@@ -958,7 +1029,8 @@ void Dock::OnMouseMove(int x, int y) {
     }
     if (pressedId_ && std::hypot(x - pressX_, y - pressY_) > 6 * m_.scale) {
         const DockItem* pressed = FindItem(pressedId_);
-        if (pressed && pressed->kind != DockItem::Kind::Trash && pressed->kind != DockItem::Kind::Toggle) {  // these stay put
+        if (pressed && pressed->kind != DockItem::Kind::Trash && pressed->kind != DockItem::Kind::Toggle &&
+            pressed->kind != DockItem::Kind::Start) {  // these stay put
             BeginDrag();
             DragMove();
             return;
@@ -1090,6 +1162,10 @@ void Dock::Activate(DockItem& it) {
         ToggleHide();
         return;
     }
+    if (it.kind == DockItem::Kind::Start) {
+        OpenStartMenu(false);
+        return;
+    }
     if (it.kind == DockItem::Kind::Trash) {
         OpenRecycleBin();
         return;
@@ -1148,6 +1224,10 @@ void Dock::ShowItemMenu(int itemId) {
 
     if (it->kind == DockItem::Kind::Toggle) {
         ShowDockMenu();
+        return;
+    }
+    if (it->kind == DockItem::Kind::Start) {
+        OpenStartMenu(true);
         return;
     }
     if (it->kind != DockItem::Kind::App) {
@@ -1592,7 +1672,7 @@ DWORD Dock::DropOver(POINT screen) {
     StartAnimating();
     const int idx = mouseV_ <= m_.margin + m_.shelfH + m_.maxIcon ? HitTest(mouseU_) : -1;
     DockItem* it = idx >= 0 ? items_[idx].get() : nullptr;
-    if (it && it->kind == DockItem::Kind::Toggle) it = nullptr;  // the hide button takes no files
+    if (it && (it->kind == DockItem::Kind::Toggle || it->kind == DockItem::Kind::Start)) it = nullptr;  // buttons take no files
     // Apps and shortcuts are added to the dock wherever they are dropped
     // (only the Recycle Bin and Stacks take them as files).
     if (AreApps(dropFiles_) && !(it && it->kind != DockItem::Kind::App)) {

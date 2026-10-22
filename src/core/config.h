@@ -61,6 +61,7 @@ struct Config {
     int recentCount = 3;              // closed apps kept in the recent section
     bool showTrash = true;
     bool showHideButton = true;       // a button at the end of the dock that hides / keeps the dock
+    bool showStartButton = true;      // a Windows (Start menu) button at the start of the dock
     std::string stackView = "auto";   // "auto" | "fan" | "grid" | "list"
     std::string stackSort = "dateAdded";  // "dateAdded" | "name" | "dateModified" | "kind"
 

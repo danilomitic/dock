@@ -125,12 +125,16 @@ private:
     int cardRow_ = 0;
     bool dirty_ = false;
     bool dockRunning_ = false;
+    Config base_;            // the file as we last read or wrote it (to see what the user changed)
+    ULONGLONG fileTime_ = 0;  // config.json's last write time when we read it
+    static ULONGLONG ConfigTime();
 };
 
 // ---------------------------------------------------------------- setup
 
 int App::Run(HINSTANCE inst) {
-    cfg_ = dx::LoadConfig();
+    cfg_ = base_ = dx::LoadConfig();
+    fileTime_ = ConfigTime();
     try {
         accent_ = winrt::Windows::UI::ViewManagement::UISettings().GetColorValue(winrt::Windows::UI::ViewManagement::UIColorType::Accent);
     } catch (...) {
@@ -178,7 +182,7 @@ int App::Run(HINSTANCE inst) {
     DwmExtendFrameIntoClientArea(hwnd_, &m);
 
     dockRunning_ = FindDock() != nullptr;
-    SetTimer(hwnd_, kTimerStatus, 2000, nullptr);
+    SetTimer(hwnd_, kTimerStatus, 1000, nullptr);
     ShowWindow(hwnd_, SW_SHOW);
     if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);  // some launchers start programs minimized
     SetForegroundWindow(hwnd_);
@@ -593,7 +597,7 @@ void App::PageAnimation() {
 void App::PageBehavior() {
     Text(L(L"Ponašanje", L"Behavior"), D2D1::RectF(cardX_, y_, cardX_ + cardW_, y_ + 40), fTitle_.get(), Ink());
     y_ += 44;
-    BeginCard(7, 2);
+    BeginCard(8, 2);
     const int pos = cfg_.position == "left" ? 0 : cfg_.position == "right" ? 2 : 1;
     Choice(L(L"Položaj na ekranu", L"Position on screen"), {L(L"Levo", L"Left"), L(L"Dole", L"Bottom"), L(L"Desno", L"Right")}, pos,
            [this](int i) {
@@ -612,6 +616,10 @@ void App::PageBehavior() {
          L"Shortcut: Ctrl+Alt+D. The dock comes back when you move the mouse to the screen edge."));
     Toggle(L(L"Dugme za sakrivanje na docku", L"Hide button on the Dock"), cfg_.showHideButton, [this](bool v) {
         cfg_.showHideButton = v;
+        Changed();
+    });
+    Toggle(L(L"Windows (Start) dugme na docku", L"Windows (Start) button on the Dock"), cfg_.showStartButton, [this](bool v) {
+        cfg_.showStartButton = v;
         Changed();
     });
     Slider(L(L"Kašnjenje pojavljivanja", L"Show delay"), cfg_.showDelay, 0, 1, 0.05, L"%.2f s", [this](double v) {
@@ -849,6 +857,15 @@ LRESULT App::Wnd(UINT msg, WPARAM wp, LPARAM lp) {
                     dockRunning_ = running;
                     InvalidateRect(hwnd_, nullptr, FALSE);
                 }
+                // The dock changed something itself (its menu, hide button, Ctrl+Alt+D): show it here too.
+                if (!dirty_ && active_ < 0 && ConfigTime() != fileTime_) {
+                    const Config fresh = dx::LoadConfig();
+                    if (!fresh.loadFailed) {
+                        cfg_ = base_ = fresh;
+                        fileTime_ = ConfigTime();
+                        InvalidateRect(hwnd_, nullptr, FALSE);
+                    }
+                }
             }
             return 0;
         case WM_DESTROY:
@@ -869,24 +886,35 @@ void App::Changed() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+// Only the settings you actually changed here are written, on top of what is in
+// the file now. Everything else (the dock's apps, and settings the dock changed
+// itself, like hiding with its button or Ctrl+Alt+D) stays as the dock left it.
 void App::Flush() {
     dirty_ = false;
-    // The dock owns its app lists: keep whatever is in the file now.
-    const Config cur = dx::LoadConfig();
-    if (cur.loadFailed) return;  // never write over a file we could not read (it holds the dock's apps)
-    Config out = cfg_;
-    out.pinned = cur.pinned;
-    out.pinnedInitialized = cur.pinnedInitialized;
-    out.recent = cur.recent;
-    out.stacks = cur.stacks;
-    out.stacksInitialized = cur.stacksInitialized;
-    out.taskbarHiddenByDock = cur.taskbarHiddenByDock;
-    out.taskbarOriginalState = cur.taskbarOriginalState;
-    out.shortcutsCreated = cur.shortcutsCreated;
-    out.systemMinAnimChanged = cur.systemMinAnimChanged;
+    Config out = dx::LoadConfig();
+    if (out.loadFailed) return;  // never write over a file we could not read (it holds the dock's apps)
+#define DX_MERGE(field) \
+    if (!(cfg_.field == base_.field)) out.field = cfg_.field;
+    DX_MERGE(language) DX_MERGE(theme) DX_MERGE(position) DX_MERGE(reserveSpace) DX_MERGE(autoHide)
+    DX_MERGE(showDelay) DX_MERGE(hideDelay) DX_MERGE(hideInFullscreen) DX_MERGE(hideTaskbar)
+    DX_MERGE(iconSize) DX_MERGE(spacing) DX_MERGE(shelfPadding) DX_MERGE(cornerRadius)
+    DX_MERGE(magnification) DX_MERGE(magnifiedSize) DX_MERGE(magnificationRange) DX_MERGE(magnifyResponse)
+    DX_MERGE(blur) DX_MERGE(glassTint) DX_MERGE(glassOpacity) DX_MERGE(border) DX_MERGE(shadow) DX_MERGE(shadowOpacity)
+    DX_MERGE(showDots) DX_MERGE(showLabels) DX_MERGE(minimizeEffect) DX_MERGE(launchBounce) DX_MERGE(attentionBounce)
+    DX_MERGE(animationSpeed) DX_MERGE(logging) DX_MERGE(startWithWindows) DX_MERGE(showRecent) DX_MERGE(recentCount)
+    DX_MERGE(showTrash) DX_MERGE(showHideButton) DX_MERGE(showStartButton) DX_MERGE(stackView) DX_MERGE(stackSort)
+#undef DX_MERGE
     out.magnifiedSize = std::max(out.magnifiedSize, out.iconSize);
     dx::SaveConfig(out);
+    cfg_ = base_ = out;
+    fileTime_ = ConfigTime();
     if (HWND dock = FindDock()) PostMessageW(dock, WM_DOCK_RELOAD, 0, 0);
+}
+
+ULONGLONG App::ConfigTime() {
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (!GetFileAttributesExW(dx::ConfigPath().c_str(), GetFileExInfoStandard, &fa)) return 0;
+    return (static_cast<ULONGLONG>(fa.ftLastWriteTime.dwHighDateTime) << 32) | fa.ftLastWriteTime.dwLowDateTime;
 }
 
 void App::ApplyPreset(int preset) {
