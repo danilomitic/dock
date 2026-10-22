@@ -868,6 +868,7 @@ void App::Flush() {
     dirty_ = false;
     // The dock owns its app lists: keep whatever is in the file now.
     const Config cur = dx::LoadConfig();
+    if (cur.loadFailed) return;  // never write over a file we could not read (it holds the dock's apps)
     Config out = cfg_;
     out.pinned = cur.pinned;
     out.pinnedInitialized = cur.pinnedInitialized;

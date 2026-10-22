@@ -186,6 +186,8 @@ void TestJsonAndConfig() {
     CHECK(v->Find("a")->array->at(2).string == "x\xC3\xA9");
     CHECK(v->Find("b")->Bool("c", false));
     CHECK(!dx::json::Parse("{\"a\": }").has_value());
+    CHECK(!dx::TryParseConfig("{ \"pinned\": [ { \"path\": ").has_value());  // a half-written file is rejected
+    CHECK(dx::TryParseConfig("{}").has_value());
 
     dx::Config c;
     c.iconSize = 52;

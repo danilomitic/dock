@@ -52,10 +52,12 @@ std::wstring ConfigDir() {
 
 std::wstring ConfigPath() { return ConfigDir() + L"\\config.json"; }
 
-Config ParseConfig(std::string_view text) {
+Config ParseConfig(std::string_view text) { return TryParseConfig(text).value_or(Config{}); }
+
+std::optional<Config> TryParseConfig(std::string_view text) {
     Config c;
     const auto root = json::Parse(text);
-    if (!root || root->type != json::Value::Type::Object) return c;
+    if (!root || root->type != json::Value::Type::Object) return std::nullopt;
     const json::Value& v = *root;
 
     c.language = v.Str("language", c.language);
@@ -203,17 +205,49 @@ std::string SerializeConfig(const Config& c) {
     return o;
 }
 
+namespace {
+std::optional<Config> ReadConfigFile(const std::wstring& path) {
+    // Shared read: another program (antivirus, backup, DockX Settings) may have it open.
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return std::nullopt;
+    std::string text;
+    char buf[8192];
+    DWORD got = 0;
+    while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) text.append(buf, got);
+    CloseHandle(h);
+    return TryParseConfig(text);
+}
+}  // namespace
+
+std::wstring ConfigBackupPath() { return ConfigDir() + L"\\config.backup.json"; }
+
+// Never starts with an empty dock because the file was briefly locked or damaged:
+// retries, then falls back to the backup. If both fail, the result is marked
+// `loadFailed` and SaveConfig refuses to overwrite the user's file with it.
 Config LoadConfig() {
-    std::ifstream f(ConfigPath(), std::ios::binary);
-    if (!f) return Config{};
-    std::stringstream ss;
-    ss << f.rdbuf();
-    return ParseConfig(ss.str());
+    const std::wstring path = ConfigPath();
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
+        GetFileAttributesW(ConfigBackupPath().c_str()) == INVALID_FILE_ATTRIBUTES)
+        return Config{};  // first run
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (auto c = ReadConfigFile(path)) return *c;
+        Sleep(100);
+    }
+    Log(L"config.json could not be read; trying the backup");
+    if (auto c = ReadConfigFile(ConfigBackupPath())) return *c;
+    Log(L"config backup could not be read either; settings will not be saved this session");
+    Config c;
+    c.loadFailed = true;
+    return c;
 }
 
 bool SaveConfig(const Config& c) {
+    if (c.loadFailed) return false;  // don't replace the user's (unreadable) file with defaults
     const std::wstring path = ConfigPath();
     const std::wstring tmp = path + L".tmp";
+    // Keep the previous good version as a backup.
+    if (ReadConfigFile(path)) CopyFileW(path.c_str(), ConfigBackupPath().c_str(), FALSE);
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return false;

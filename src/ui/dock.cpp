@@ -100,10 +100,22 @@ void FrameClock::Loop() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     while (!quit_) {
         WaitForSingleObject(wake_, INFINITE);
+        LARGE_INTEGER freq, last, now;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&last);
         while (running_ && !quit_) {
             // Block until the compositor's next frame (matches the monitor refresh rate).
             const DWORD r = waitForClock ? waitForClock(0, nullptr, 100) : WAIT_FAILED;
             if (r == WAIT_FAILED && FAILED(DwmFlush())) Sleep(8);
+            // Fullscreen games can stop the compositor clock, so the wait returns at once.
+            // Never tick faster than ~250 fps; that keeps the CPU idle in that case.
+            QueryPerformanceCounter(&now);
+            const double ms = 1000.0 * static_cast<double>(now.QuadPart - last.QuadPart) / static_cast<double>(freq.QuadPart);
+            if (ms < 4.0) {
+                Sleep(static_cast<DWORD>(std::ceil(4.0 - ms)));
+                QueryPerformanceCounter(&now);
+            }
+            last = now;
             if (!pending_.exchange(true)) PostMessageW(target_, WM_APP_TICK, 0, 0);
         }
     }
@@ -418,6 +430,7 @@ void Dock::ApplyTheme() {
 // DockX Settings changed the config file: apply everything live.
 void Dock::ReloadConfig() {
     Config fresh = LoadConfig();
+    if (fresh.loadFailed) return;
     // The dock owns its item lists and internal flags; take only the settings.
     fresh.pinned = cfg_.pinned;
     fresh.pinnedInitialized = cfg_.pinnedInitialized;

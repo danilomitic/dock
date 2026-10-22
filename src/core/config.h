@@ -63,6 +63,8 @@ struct Config {
     std::string stackView = "auto";   // "auto" | "fan" | "grid" | "list"
     std::string stackSort = "dateAdded";  // "dateAdded" | "name" | "dateModified" | "kind"
 
+    bool loadFailed = false;  // not saved: the file existed but could not be read
+
     bool pinnedInitialized = false;
     std::vector<PinnedItem> pinned;
     bool stacksInitialized = false;
@@ -70,10 +72,12 @@ struct Config {
     std::vector<PinnedItem> recent;    // most recent first
 };
 
-std::wstring ConfigDir();   // %APPDATA%\DockX (created if missing)
-std::wstring ConfigPath();  // %APPDATA%\DockX\config.json
+std::wstring ConfigDir();         // %APPDATA%\DockX (created if missing)
+std::wstring ConfigPath();        // %APPDATA%\DockX\config.json
+std::wstring ConfigBackupPath();  // %APPDATA%\DockX\config.backup.json (previous good version)
 
-Config ParseConfig(std::string_view json);
+Config ParseConfig(std::string_view json);                  // defaults if invalid
+std::optional<Config> TryParseConfig(std::string_view json);  // nullopt if invalid
 std::string SerializeConfig(const Config& c);
 
 Config LoadConfig();             // defaults if missing or invalid
