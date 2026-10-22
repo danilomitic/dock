@@ -8,7 +8,7 @@
 namespace dx {
 namespace {
 
-constexpr int kGenieStrips = 56;
+constexpr int kGenieStrips = 72;
 
 // "Canonical" space: the dock is always at the bottom, so one genie formula
 // works for every edge. Left/right docks are rotated into it and back.

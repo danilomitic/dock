@@ -56,7 +56,7 @@ private:
 };
 
 struct DockItem {
-    enum class Kind { App, Stack, Trash };
+    enum class Kind { App, Stack, Trash, Toggle };  // Toggle: the hide/show-the-dock button
 
     int id = 0;
     Kind kind = Kind::App;
@@ -152,6 +152,9 @@ private:
     void CreateItemVisuals(DockItem& it);
     void RequestIcon(DockItem& it);
     void SetIconBitmap(DockItem& it, IWICBitmap* bmp);
+    void SetIconSurface(DockItem& it, const wuc::CompositionDrawingSurface& surface);
+    void DrawToggleIcon(DockItem& it);
+    void ToggleHide();  // the dock button and Ctrl+Alt+D: hide the dock / keep it shown
     void Rescan();
     void ScheduleRescan(bool alsoLate);
     void SavePinned();

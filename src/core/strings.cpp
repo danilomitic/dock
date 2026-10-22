@@ -75,6 +75,8 @@ const wchar_t* Tr(Text t) {
         case Text::ShowRecent: return g_serbian ? L"Prikaži nedavne aplikacije" : L"Show recent apps";
         case Text::EmptyFolder: return g_serbian ? L"Prazno" : L"Empty";
         case Text::StartWithWindows: return g_serbian ? L"Pokreni sa Windowsom" : L"Start with Windows";
+        case Text::HideDock: return g_serbian ? L"Sakrij Dock (Ctrl+Alt+D)" : L"Hide Dock (Ctrl+Alt+D)";
+        case Text::KeepDockShown: return g_serbian ? L"Zadrži Dock prikazan (Ctrl+Alt+D)" : L"Keep Dock shown (Ctrl+Alt+D)";
     }
     return L"";
 }

@@ -104,6 +104,7 @@ std::optional<Config> TryParseConfig(std::string_view text) {
     c.showRecent = v.Bool("showRecent", c.showRecent);
     c.recentCount = static_cast<int>(Clamp(v.Num("recentCount", c.recentCount), 0, 10));
     c.showTrash = v.Bool("showTrash", c.showTrash);
+    c.showHideButton = v.Bool("showHideButton", c.showHideButton);
     {
         const std::string view = v.Str("stackView", c.stackView);
         c.stackView = (view == "fan" || view == "grid" || view == "list") ? view : "auto";
@@ -180,6 +181,7 @@ std::string SerializeConfig(const Config& c) {
     kv("showRecent", b(c.showRecent));
     kv("recentCount", json::Number(c.recentCount));
     kv("showTrash", b(c.showTrash));
+    kv("showHideButton", b(c.showHideButton));
     kv("stackView", json::Quote(c.stackView));
     kv("stackSort", json::Quote(c.stackSort));
     auto items = [&o](const char* key, const std::vector<PinnedItem>& list, bool last) {

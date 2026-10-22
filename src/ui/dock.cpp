@@ -129,6 +129,7 @@ Dock::~Dock() {
     if (cloakHook_) UnhookWinEvent(cloakHook_);
     if (foregroundHook_) UnhookWinEvent(foregroundHook_);
     if (minimizeHook_) UnhookWinEvent(minimizeHook_);
+    if (hwnd_) UnregisterHotKey(hwnd_, 1);
     minimizer_.Stop();
     RestoreMinimizeSetting();
     if (hwnd_) RevokeDragDrop(hwnd_);
@@ -214,6 +215,8 @@ bool Dock::Create(HINSTANCE instance) {
                                       WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     minimizeHook_ = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART, nullptr, WinEventProc, 0, 0,
                                     WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    // Ctrl+Alt+D hides the dock / keeps it shown (like Option+Command+D on a Mac).
+    if (!RegisterHotKey(hwnd_, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'D')) Log(L"Ctrl+Alt+D is taken by another app");
     ApplyMinimizeSetting();
     RegisterDropTargets();
     SetStartWithWindows(cfg_.startWithWindows);
@@ -411,6 +414,8 @@ void Dock::ApplyTheme() {
     for (auto& it : items_) it->dotVisual.Brush(dotBrush);
     const auto sepBrush = c.CreateColorBrush(dark ? Rgba(255, 255, 255, 60) : Rgba(0, 0, 0, 45));
     for (auto& s : separators_) s.Brush(sepBrush);
+    for (auto& it : items_)
+        if (it->kind == DockItem::Kind::Toggle) DrawToggleIcon(*it);
 
     labelFormat_ = nullptr;
     if (SUCCEEDED(gfx_.DWrite()->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
@@ -455,6 +460,17 @@ void Dock::ReloadConfig() {
         } else {
             for (auto& it : items_)
                 if (it->kind == DockItem::Kind::Trash) {
+                    it->removing = true;
+                    it->presence.target = 0;
+                }
+        }
+    }
+    if (old.showHideButton != cfg_.showHideButton) {
+        if (cfg_.showHideButton) {
+            AddItem(false, L"", L"", true, DockItem::Kind::Toggle);
+        } else {
+            for (auto& it : items_)
+                if (it->kind == DockItem::Kind::Toggle) {
                     it->removing = true;
                     it->presence.target = 0;
                 }
@@ -516,6 +532,7 @@ void Dock::LoadPinned() {
     }
     for (const auto& s : cfg_.stacks) AddItem(false, s, L"", false, DockItem::Kind::Stack);
     if (cfg_.showTrash) AddItem(false, L"", L"", false, DockItem::Kind::Trash);
+    if (cfg_.showHideButton) AddItem(false, L"", L"", false, DockItem::Kind::Toggle);
 }
 
 int Dock::Section(const DockItem& it) const {
@@ -553,9 +570,11 @@ void Dock::NormalizeOrder() {
     if (dragging_) return;
     ChangeOrder([this] {
         std::stable_sort(items_.begin(), items_.end(), [this](const auto& a, const auto& b) {
-            const int ka = Section(*a) * 2 + (a->kind == DockItem::Kind::Trash ? 1 : 0);
-            const int kb = Section(*b) * 2 + (b->kind == DockItem::Kind::Trash ? 1 : 0);
-            return ka < kb;
+            // Within the right side: stacks, then the Recycle Bin, then the hide button.
+            auto key = [this](const DockItem& it) {
+                return Section(it) * 4 + (it.kind == DockItem::Kind::Trash ? 1 : it.kind == DockItem::Kind::Toggle ? 2 : 0);
+            };
+            return key(*a) < key(*b);
         });
     });
 }
@@ -695,6 +714,10 @@ void Dock::CreateItemVisuals(DockItem& it) {
 }
 
 void Dock::RequestIcon(DockItem& it) {
+    if (it.kind == DockItem::Kind::Toggle) {
+        DrawToggleIcon(it);
+        return;
+    }
     const auto cached = LoadCachedIcon(gfx_.Wic(), it.iconSource);
     if (cached) SetIconBitmap(it, cached.get());
     icons_.Request({it.id, it.iconSource, it.matchExe.empty() ? it.path : it.matchExe, !cached});
@@ -709,6 +732,68 @@ void Dock::SetIconBitmap(DockItem& it, IWICBitmap* bmp) {
         const D2D1_RECT_F dest = D2D1::RectF(0, 0, F(px), F(px));
         dc->DrawBitmap(bitmap.get(), &dest, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
     });
+    SetIconSurface(it, surface);
+}
+
+// The hide button: a glass circle with a chevron (down = hide the dock, up = keep it shown).
+void Dock::DrawToggleIcon(DockItem& it) {
+    it.name = cfg_.autoHide ? Tr(Text::KeepDockShown) : Tr(Text::HideDock);
+    const int px = static_cast<int>(std::ceil(m_.maxIcon));
+    const auto surface = gfx_.CreateSurface(px, px);
+    const bool dark = Dark();
+    const bool up = cfg_.autoHide;
+    gfx_.Draw(surface, [&](ID2D1DeviceContext* dc) {
+        const float s = static_cast<float>(px), c = s / 2, r = s * 0.34f;
+        winrt::com_ptr<ID2D1SolidColorBrush> fill, edge, ink;
+        dc->CreateSolidColorBrush(dark ? D2D1::ColorF(1, 1, 1, 0.14f) : D2D1::ColorF(0, 0, 0, 0.07f), fill.put());
+        dc->CreateSolidColorBrush(dark ? D2D1::ColorF(1, 1, 1, 0.3f) : D2D1::ColorF(0, 0, 0, 0.18f), edge.put());
+        dc->CreateSolidColorBrush(dark ? D2D1::ColorF(1, 1, 1, 0.9f) : D2D1::ColorF(0, 0, 0, 0.72f), ink.put());
+        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c, c), r, r), fill.get());
+        dc->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(c, c), r, r), edge.get(), s * 0.015f);
+        winrt::com_ptr<ID2D1PathGeometry> chevron;
+        gfx_.D2DFactory()->CreatePathGeometry(chevron.put());
+        winrt::com_ptr<ID2D1GeometrySink> sink;
+        chevron->Open(sink.put());
+        const float w = s * 0.13f, d = s * 0.065f * (up ? -1.0f : 1.0f);
+        sink->BeginFigure(D2D1::Point2F(c - w, c - d), D2D1_FIGURE_BEGIN_HOLLOW);
+        sink->AddLine(D2D1::Point2F(c, c + d));
+        sink->AddLine(D2D1::Point2F(c + w, c - d));
+        sink->EndFigure(D2D1_FIGURE_END_OPEN);
+        sink->Close();
+        winrt::com_ptr<ID2D1StrokeStyle> round;
+        gfx_.D2DFactory()->CreateStrokeStyle(
+            D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND),
+            nullptr, 0, round.put());
+        dc->DrawGeometry(chevron.get(), ink.get(), s * 0.055f, round.get());
+    });
+    SetIconSurface(it, surface);
+    if (labelItemId_ == it.id) {
+        labelItemId_ = 0;
+        UpdateLabel();
+    }
+}
+
+void Dock::ToggleHide() {
+    cfg_.autoHide = !cfg_.autoHide;
+    SaveConfig(cfg_);
+    PositionWindow(true);  // reserve or release the screen space
+    if (cfg_.autoHide) {
+        // Slide down now, even with the mouse on the dock; it comes back at the screen edge.
+        hovering_ = false;
+        hoverId_ = 0;
+        magnify_.target = 0;
+        SetHidden(true);
+    } else {
+        SetHidden(AutoHideActive());
+    }
+    for (auto& it : items_)
+        if (it->kind == DockItem::Kind::Toggle) DrawToggleIcon(*it);
+    ApplyLayout();
+    UpdateRegion();
+    StartAnimating();
+}
+
+void Dock::SetIconSurface(DockItem& it, const wuc::CompositionDrawingSurface& surface) {
     const auto& c = gfx_.Comp();
     const auto brush = c.CreateSurfaceBrush(surface);
     brush.Stretch(wuc::CompositionStretch::Fill);
@@ -873,7 +958,7 @@ void Dock::OnMouseMove(int x, int y) {
     }
     if (pressedId_ && std::hypot(x - pressX_, y - pressY_) > 6 * m_.scale) {
         const DockItem* pressed = FindItem(pressedId_);
-        if (pressed && pressed->kind != DockItem::Kind::Trash) {  // the Recycle Bin stays put
+        if (pressed && pressed->kind != DockItem::Kind::Trash && pressed->kind != DockItem::Kind::Toggle) {  // these stay put
             BeginDrag();
             DragMove();
             return;
@@ -1001,6 +1086,10 @@ void Dock::Activate(DockItem& it) {
         ShowStack(it.id);
         return;
     }
+    if (it.kind == DockItem::Kind::Toggle) {
+        ToggleHide();
+        return;
+    }
     if (it.kind == DockItem::Kind::Trash) {
         OpenRecycleBin();
         return;
@@ -1057,6 +1146,10 @@ void Dock::ShowItemMenu(int itemId) {
     const bool shift = GetKeyState(VK_SHIFT) < 0;
     const MenuSide side = edge_ == Edge::Left ? MenuSide::Right : edge_ == Edge::Right ? MenuSide::Left : MenuSide::Above;
 
+    if (it->kind == DockItem::Kind::Toggle) {
+        ShowDockMenu();
+        return;
+    }
     if (it->kind != DockItem::Kind::App) {
         std::vector<MenuItem> items;
         if (it->kind == DockItem::Kind::Trash) {
@@ -1215,11 +1308,7 @@ void Dock::ShowDockMenu() {
             ApplyTheme();
             break;
         case kCmdAutoHide:
-            cfg_.autoHide = !cfg_.autoHide;
-            SaveConfig(cfg_);
-            PositionWindow(true);  // reserve or release screen space
-            SetHidden(AutoHideActive());
-            ApplyLayout();
+            ToggleHide();
             break;
         case kCmdPosLeft: setPosition("left"); break;
         case kCmdPosBottom: setPosition("bottom"); break;
@@ -1503,6 +1592,7 @@ DWORD Dock::DropOver(POINT screen) {
     StartAnimating();
     const int idx = mouseV_ <= m_.margin + m_.shelfH + m_.maxIcon ? HitTest(mouseU_) : -1;
     DockItem* it = idx >= 0 ? items_[idx].get() : nullptr;
+    if (it && it->kind == DockItem::Kind::Toggle) it = nullptr;  // the hide button takes no files
     // Apps and shortcuts are added to the dock wherever they are dropped
     // (only the Recycle Bin and Stacks take them as files).
     if (AreApps(dropFiles_) && !(it && it->kind != DockItem::Kind::App)) {
@@ -2083,6 +2173,9 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_APP_RELOAD:
             ReloadConfig();
+            return 0;
+        case WM_HOTKEY:
+            if (wp == 1) ToggleHide();
             return 0;
         case WM_APP_SHOW:
             // Someone started DockX again: bring the dock out (if it auto-hides) and open the settings.

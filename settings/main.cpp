@@ -593,7 +593,7 @@ void App::PageAnimation() {
 void App::PageBehavior() {
     Text(L(L"Ponašanje", L"Behavior"), D2D1::RectF(cardX_, y_, cardX_ + cardW_, y_ + 40), fTitle_.get(), Ink());
     y_ += 44;
-    BeginCard(6, 1);
+    BeginCard(7, 2);
     const int pos = cfg_.position == "left" ? 0 : cfg_.position == "right" ? 2 : 1;
     Choice(L(L"Položaj na ekranu", L"Position on screen"), {L(L"Levo", L"Left"), L(L"Dole", L"Bottom"), L(L"Desno", L"Right")}, pos,
            [this](int i) {
@@ -607,6 +607,11 @@ void App::PageBehavior() {
          L"Maximized windows stop above the dock. Turn off to keep desktop icons where they are."));
     Toggle(L(L"Automatski sakrij Dock", L"Automatically hide the Dock"), cfg_.autoHide, [this](bool v) {
         cfg_.autoHide = v;
+        Changed();
+    }, L(L"Prečica: Ctrl+Alt+D. Dock se vraća kad dovedeš miš do ivice ekrana.",
+         L"Shortcut: Ctrl+Alt+D. The dock comes back when you move the mouse to the screen edge."));
+    Toggle(L(L"Dugme za sakrivanje na docku", L"Hide button on the Dock"), cfg_.showHideButton, [this](bool v) {
+        cfg_.showHideButton = v;
         Changed();
     });
     Slider(L(L"Kašnjenje pojavljivanja", L"Show delay"), cfg_.showDelay, 0, 1, 0.05, L"%.2f s", [this](double v) {

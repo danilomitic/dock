@@ -21,7 +21,7 @@ other apps.
 **Moves like macOS**
 - Magnification that follows the cursor (spring physics, interruptible at any moment)
 - Launch bounce until the app's window appears, attention bounce when an app flashes
-- **Genie** or **Scale** minimize effect: windows pour into their dock icon and come back out of it
+- **Genie** or **Scale** minimize effect: the window bends into a funnel and pours into its dock icon, and comes back out of it
 - Smooth glide when icons are added, removed or reordered
 
 **Works like macOS**
@@ -36,6 +36,7 @@ other apps.
 - **Recycle Bin**: shows empty/full, drop files to recycle them (never a permanent delete), right-click to empty
 - Bottom, left or right of the screen; reserves screen space like the taskbar (optional)
 - Auto-hide with an invisible edge trigger; hides automatically when an app is fullscreen (games, videos)
+- A **hide button** at the end of the dock and **Ctrl+Alt+D** slide the dock down / keep it shown
 - Optionally auto-hides the Windows taskbar while it runs
 
 **Safe**
@@ -63,6 +64,7 @@ A separate settings app in the style of macOS System Settings (`DockX.Settings.e
 | --- | --- |
 | Start DockX | Start menu › **DockX** (it also starts with Windows) |
 | Quit DockX | Right-click the strip under the icons (or a separator) › **Quit DockX** |
+| Hide the dock / bring it back | Click the chevron button at the end of the dock, or press **Ctrl+Alt+D**; when hidden, move the mouse to the screen edge |
 | Change settings | Right-click the strip under the icons › **Dock Settings…** |
 | Add an app | Drag it (or its shortcut) from the desktop / Explorer onto the dock |
 | Remove an app | Drag it away from the dock and let go |

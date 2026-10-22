@@ -60,6 +60,7 @@ struct Config {
     bool showRecent = true;           // running + recently used apps after a separator (macOS default)
     int recentCount = 3;              // closed apps kept in the recent section
     bool showTrash = true;
+    bool showHideButton = true;       // a button at the end of the dock that hides / keeps the dock
     std::string stackView = "auto";   // "auto" | "fan" | "grid" | "list"
     std::string stackSort = "dateAdded";  // "dateAdded" | "name" | "dateModified" | "kind"
 
