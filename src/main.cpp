@@ -21,10 +21,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
     if (argv) LocalFree(argv);
 
-    // One dock at a time.
+    // One dock at a time. Starting DockX again while it runs shows the dock and opens DockX Settings,
+    // so it never looks like "nothing happened".
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\DockX.SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (mutex) CloseHandle(mutex);
+        if (HWND dock = FindWindowW(L"DockX.Window", nullptr)) {
+            AllowSetForegroundWindow(ASFW_ANY);
+            PostMessageW(dock, dx::WM_APP_SHOW, 0, 0);
+        }
         return 0;
     }
 

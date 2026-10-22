@@ -2071,6 +2071,14 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_RELOAD:
             ReloadConfig();
             return 0;
+        case WM_APP_SHOW:
+            // Someone started DockX again: bring the dock out (if it auto-hides) and open the settings.
+            if (hide_.target == 1) {
+                SetHidden(false);
+                SetTimer(hwnd_, kTimerHide, 2500, nullptr);
+            }
+            OpenSettingsApp();
+            return 0;
         case WM_APP_SHELL: {
             // Something changed in the Recycle Bin: release the notification, check a moment later.
             PIDLIST_ABSOLUTE* pidls = nullptr;

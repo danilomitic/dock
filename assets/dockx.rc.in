@@ -1,0 +1,2 @@
+// App icon for DockX.exe and DockX.Settings.exe (configured by CMake with the absolute path).
+1 ICON "@DOCKX_ICON@"

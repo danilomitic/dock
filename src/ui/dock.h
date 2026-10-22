@@ -26,6 +26,7 @@ constexpr UINT WM_APP_ICON = WM_APP + 2;
 constexpr UINT WM_APP_BAR = WM_APP + 3;
 constexpr UINT WM_APP_SHELL = WM_APP + 4;   // Recycle Bin changed
 constexpr UINT WM_APP_RELOAD = WM_APP + 5;  // DockX Settings saved new settings
+constexpr UINT WM_APP_SHOW = WM_APP + 6;    // DockX was started again: show the dock + settings
 
 // Wakes the UI thread once per compositor frame, only while something animates.
 // When nothing moves, the thread sleeps on an event: 0 % CPU.

@@ -254,6 +254,7 @@ void MakeShortcut(const std::wstring& lnk, const std::wstring& target) {
     const std::wstring dir = target.substr(0, target.find_last_of(L'\\'));
     link->SetWorkingDirectory(dir.c_str());
     link->SetDescription(L"DockX");
+    link->SetIconLocation(target.c_str(), 0);
     if (FAILED(link.as<IPersistFile>()->Save(lnk.c_str(), TRUE))) Log(L"Could not create %s", lnk.c_str());
 }
 }  // namespace

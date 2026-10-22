@@ -159,7 +159,9 @@ int App::Run(HINSTANCE inst) {
     wc.hInstance = inst;
     wc.lpszClassName = L"DockX.Settings";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));  // the DockX icon
+    wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                               GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     RegisterClassExW(&wc);
     const UINT dpi = GetDpiForSystem();
     const int w = MulDiv(920, dpi, 96), h = MulDiv(700, dpi, 96);

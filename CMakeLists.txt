@@ -13,6 +13,10 @@ if(DOCKX_ASAN)
   add_compile_options(/fsanitize=address)
 endif()
 
+# The app icon (assets/make-icon.ps1 draws it).
+set(DOCKX_ICON "${CMAKE_SOURCE_DIR}/assets/dockx.ico")
+configure_file(assets/dockx.rc.in ${CMAKE_BINARY_DIR}/dockx.rc @ONLY)
+
 # Pure logic (no UI): config, JSON, layout math. Unit-tested.
 add_library(dockcore STATIC
   src/core/json.cpp
@@ -38,13 +42,14 @@ add_executable(DockX WIN32
   src/ui/expose.cpp
   src/ui/stack.cpp
   src/ui/minimize.cpp
-  src/app.manifest)
+  src/app.manifest
+  ${CMAKE_BINARY_DIR}/dockx.rc)
 target_link_libraries(DockX PRIVATE dockcore
   d3d11 dxgi d2d1 dwrite dxguid windowscodecs dwmapi shlwapi shell32 ole32 oleaut32
   uuid propsys windowsapp CoreMessaging version shcore)
 
 # The settings window: a separate, small program (only runs while you change settings).
-add_executable(DockX.Settings WIN32 settings/main.cpp src/app.manifest)
+add_executable(DockX.Settings WIN32 settings/main.cpp src/app.manifest ${CMAKE_BINARY_DIR}/dockx.rc)
 target_link_libraries(DockX.Settings PRIVATE dockcore d2d1 dwrite dwmapi comdlg32 shell32 ole32 windowsapp)
 
 add_executable(dock_tests tests/tests.cpp)
