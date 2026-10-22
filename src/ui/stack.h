@@ -16,6 +16,7 @@ struct StackOptions {
     Edge edge = Edge::Bottom;
     bool dark = true;
     double scale = 1;
+    bool held = false;  // opened by pressing and holding: releasing over a file opens it
 };
 
 // Opens a Stack (a folder in the dock) as a macOS-style fan, grid or list.

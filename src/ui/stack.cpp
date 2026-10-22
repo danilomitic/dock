@@ -103,7 +103,13 @@ private:
             f->SetTrimming(&trimming, sign.get());
         };
         make(fontPill_, 13, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false);
-        make(fontName_, 12, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true);
+        make(fontName_, 12.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+        make(fontTitleCenter_, 14.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+        if (SUCCEEDED(dw->CreateTextFormat(L"Segoe Fluent Icons", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                           DWRITE_FONT_STRETCH_NORMAL, 26 * s_, L"", fontGlyph_.put()))) {
+            fontGlyph_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            fontGlyph_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
         make(fontRow_, 13, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false);
         make(fontTitle_, 14, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false);
         make(fontLink_, 13, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING, false);
@@ -148,7 +154,7 @@ private:
             r.id = static_cast<int>(i);
             r.source = entries_[c.entry].path;
             r.cache = false;
-            r.thumbnail = true;
+            r.thumbnail = !entries_[c.entry].directory;  // folders: the folder icon, not a (white) preview
             r.size = c.iconPx <= 32 ? 48 : 128;
             loader_.Request(std::move(r));
         }
@@ -258,56 +264,76 @@ private:
         const auto& c = gfx_.Comp();
         const bool grid = mode_ == Mode::Grid;
         const size_t n = entries_.size();
-        const float pad = Px(12), header = Px(40);
+        const float pad = Px(14);
+        const float header = grid ? Px(40) : Px(40);
         int cols = 1;
         size_t shown = 0;
         float cellW = 0, cellH = 0, iconPx = 0;
         if (grid) {
-            cols = n <= 3 ? static_cast<int>(std::max<size_t>(n, 1)) : std::clamp(static_cast<int>(std::ceil(std::sqrt(n * 1.4))), 3, 6);
-            shown = std::min<size_t>(n, static_cast<size_t>(cols) * 4);
-            cellW = Px(96);
-            cellH = Px(100);
-            iconPx = Px(60);
+            // macOS grid: big previews, names under them, "Open in Explorer" as the last tile.
+            const size_t total = n + 1;
+            cols = total <= 4 ? static_cast<int>(total) : std::clamp(static_cast<int>(std::ceil(std::sqrt(total * 1.6))), 4, 7);
+            shown = std::min<size_t>(n, static_cast<size_t>(cols) * 4 - 1);
+            cellW = Px(112);
+            cellH = Px(112);
+            iconPx = Px(72);
         } else {
             shown = std::min<size_t>(n, 16);
             cellW = Px(280);
             cellH = Px(28);
             iconPx = Px(20);
         }
-        const int rows = std::max(1, static_cast<int>((shown + cols - 1) / cols));
+        const size_t tiles = grid ? shown + 1 : shown;
+        const int rows = std::max(1, static_cast<int>((tiles + cols - 1) / cols));
         panelW_ = static_cast<int>(std::ceil(2 * pad + cols * cellW));
         panelH_ = static_cast<int>(std::ceil(header + rows * cellH + pad));
-        linkText_ = LinkText(shown) + L"  ›";
+        linkText_ = grid ? LinkText(shown) : LinkText(shown) + L"  ›";
         title_ = FolderDisplayName(o_.folder);
 
-        // Place the panel next to the dock icon.
+        // Place the panel next to the dock icon, with the beak pointing at it.
         MONITORINFO mi{sizeof(mi)};
         const POINT center{(o_.icon.left + o_.icon.right) / 2, (o_.icon.top + o_.icon.bottom) / 2};
         GetMonitorInfoW(MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST), &mi);
         const RECT& work = mi.rcWork;
-        int x = center.x - panelW_ / 2, y = o_.icon.top - static_cast<int>(Px(10)) - panelH_;
-        if (o_.edge == Edge::Left) { x = o_.icon.right + static_cast<int>(Px(10)); y = center.y - panelH_ / 2; }
-        if (o_.edge == Edge::Right) { x = o_.icon.left - static_cast<int>(Px(10)) - panelW_; y = center.y - panelH_ / 2; }
+        const int gap = static_cast<int>(Px(16));
+        int x = center.x - panelW_ / 2, y = o_.icon.top - gap - panelH_;
+        POINT target{center.x, o_.icon.top};
+        if (o_.edge == Edge::Left) {
+            x = o_.icon.right + gap;
+            y = center.y - panelH_ / 2;
+            target = {o_.icon.right, center.y};
+        }
+        if (o_.edge == Edge::Right) {
+            x = o_.icon.left - gap - panelW_;
+            y = center.y - panelH_ / 2;
+            target = {o_.icon.left, center.y};
+        }
         x = std::clamp(x, static_cast<int>(work.left), static_cast<int>(std::max(work.left, work.right - panelW_)));
         y = std::clamp(y, static_cast<int>(work.top), static_cast<int>(std::max(work.top, work.bottom - panelH_)));
+        popup_.SetBeak(o_.edge, target);
         popup_.Place(x, y, panelW_, panelH_);
 
-        // The link in the header is cell 0.
-        Cell link;
-        link.entry = -1;
-        const float linkW = TextWidth(linkText_, fontLink_.get(), Px(220)) + Px(8);
-        link.rect = D2D1::RectF(panelW_ - pad - linkW, Px(8), panelW_ - pad, header - Px(6));
-        cells_.push_back(std::move(link));
-        for (size_t i = 0; i < shown; ++i) {
+        if (!grid) {
+            // List: the link sits in the header.
+            Cell link;
+            link.entry = -1;
+            const float linkW = TextWidth(linkText_, fontLink_.get(), Px(220)) + Px(8);
+            link.rect = D2D1::RectF(panelW_ - pad - linkW, Px(8), panelW_ - pad, header - Px(6));
+            cells_.push_back(std::move(link));
+        }
+        for (size_t i = 0; i < tiles; ++i) {
             Cell cell;
-            cell.entry = static_cast<int>(i);
+            const bool isLink = grid && i == shown;
+            cell.entry = isLink ? -1 : static_cast<int>(i);
             cell.iconPx = iconPx;
             const float cx = pad + (i % cols) * cellW, cy = header + (i / cols) * cellH;
             cell.rect = D2D1::RectF(cx, cy, cx + cellW, cy + cellH);
-            cell.icon = c.CreateSpriteVisual();
-            cell.icon.Size({iconPx, iconPx});
-            if (grid) cell.icon.Offset({cx + (cellW - iconPx) / 2, cy + Px(6), 0});
-            else cell.icon.Offset({cx + Px(6), cy + (cellH - iconPx) / 2, 0});
+            if (!isLink) {
+                cell.icon = c.CreateSpriteVisual();
+                cell.icon.Size({iconPx, iconPx});
+                if (grid) cell.icon.Offset({cx + (cellW - iconPx) / 2, cy + Px(6), 0});
+                else cell.icon.Offset({cx + Px(6), cy + (cellH - iconPx) / 2, 0});
+            }
             cells_.push_back(std::move(cell));
         }
         DrawPanel();
@@ -343,39 +369,53 @@ private:
             dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             winrt::com_ptr<ID2D1SolidColorBrush> text, dim, link, hot, line;
             dc->CreateSolidColorBrush(o_.dark ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0, 0, 0, 0.86f), text.put());
-            dc->CreateSolidColorBrush(o_.dark ? D2D1::ColorF(1, 1, 1, 0.5f) : D2D1::ColorF(0, 0, 0, 0.45f), dim.put());
+            dc->CreateSolidColorBrush(o_.dark ? D2D1::ColorF(1, 1, 1, 0.55f) : D2D1::ColorF(0, 0, 0, 0.5f), dim.put());
             dc->CreateSolidColorBrush(ToD2D(accent, 1.0f), link.put());
-            dc->CreateSolidColorBrush(ToD2D(accent, 0.28f), hot.put());
+            dc->CreateSolidColorBrush(ToD2D(accent, 0.30f), hot.put());
             dc->CreateSolidColorBrush(o_.dark ? D2D1::ColorF(1, 1, 1, 0.1f) : D2D1::ColorF(0, 0, 0, 0.08f), line.put());
-            const float pad = Px(12), header = Px(40);
-            dc->DrawTextW(title_.c_str(), static_cast<UINT32>(title_.size()), fontTitle_.get(),
-                          D2D1::RectF(pad + Px(4), Px(6), panelW_ / 2.0f, header - Px(4)), text.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            const Cell& lc = cells_[0];
-            dc->DrawTextW(linkText_.c_str(), static_cast<UINT32>(linkText_.size()), fontLink_.get(), lc.rect,
-                          hover_ == 0 ? text.get() : link.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            dc->DrawLine(D2D1::Point2F(pad, header - 0.5f), D2D1::Point2F(panelW_ - pad, header - 0.5f), line.get());
-            if (entries_.empty()) {
+            const float pad = Px(14), header = Px(40);
+            // Title: centered like macOS for the grid, on the left for the list.
+            dc->DrawTextW(title_.c_str(), static_cast<UINT32>(title_.size()), grid ? fontTitleCenter_.get() : fontTitle_.get(),
+                          D2D1::RectF(pad + Px(4), Px(6), grid ? panelW_ - pad - Px(4) : panelW_ / 2.0f, header - Px(4)),
+                          text.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            if (!grid) dc->DrawLine(D2D1::Point2F(pad, header - 0.5f), D2D1::Point2F(panelW_ - pad, header - 0.5f), line.get());
+            if (entries_.empty() && !grid) {
                 const std::wstring empty = Tr(Text::EmptyFolder);
                 dc->DrawTextW(empty.c_str(), static_cast<UINT32>(empty.size()), fontPill_.get(),
                               D2D1::RectF(0, header, static_cast<float>(panelW_), static_cast<float>(panelH_)), dim.get());
             }
-            for (size_t i = 1; i < cells_.size(); ++i) {
+            for (size_t i = 0; i < cells_.size(); ++i) {
                 const Cell& cell = cells_[i];
-                const FolderEntry& e = entries_[cell.entry];
-                if (static_cast<int>(i) == hover_)
-                    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cell.rect.left + Px(2), cell.rect.top + Px(1),
-                                                                           cell.rect.right - Px(2), cell.rect.bottom - Px(1)),
-                                                               Px(6), Px(6)),
+                const bool isHot = static_cast<int>(i) == hover_;
+                if (cell.entry < 0 && !grid) {  // list header link
+                    dc->DrawTextW(linkText_.c_str(), static_cast<UINT32>(linkText_.size()), fontLink_.get(), cell.rect,
+                                  isHot ? text.get() : link.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    continue;
+                }
+                if (isHot)
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cell.rect.left + Px(3), cell.rect.top + Px(1),
+                                                                           cell.rect.right - Px(3), cell.rect.bottom - Px(1)),
+                                                               Px(8), Px(8)),
                                              hot.get());
+                const std::wstring& name = cell.entry >= 0 ? entries_[cell.entry].name : linkText_;
                 if (grid) {
-                    const D2D1_RECT_F nameRect = D2D1::RectF(cell.rect.left + Px(4), cell.rect.top + Px(10) + cell.iconPx,
+                    if (cell.entry < 0) {
+                        // "Open in Explorer" tile: an arrow in a circle, like the Finder one.
+                        const float r = cell.iconPx * 0.42f;
+                        const D2D1_POINT_2F ctr = D2D1::Point2F((cell.rect.left + cell.rect.right) / 2, cell.rect.top + Px(6) + cell.iconPx / 2);
+                        dc->DrawEllipse(D2D1::Ellipse(ctr, r, r), text.get(), Px(3));
+                        static const std::wstring kArrow = L"";  // Segoe Fluent Icons: forward arrow
+                        dc->DrawTextW(kArrow.c_str(), static_cast<UINT32>(kArrow.size()), fontGlyph_.get(),
+                                      D2D1::RectF(ctr.x - r, ctr.y - r, ctr.x + r, ctr.y + r), text.get());
+                    }
+                    const D2D1_RECT_F nameRect = D2D1::RectF(cell.rect.left + Px(4), cell.rect.top + Px(12) + cell.iconPx,
                                                              cell.rect.right - Px(4), cell.rect.bottom - Px(2));
-                    dc->DrawTextW(e.name.c_str(), static_cast<UINT32>(e.name.size()), fontName_.get(), nameRect, text.get(),
+                    dc->DrawTextW(name.c_str(), static_cast<UINT32>(name.size()), fontName_.get(), nameRect, text.get(),
                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
                 } else {
                     const D2D1_RECT_F nameRect = D2D1::RectF(cell.rect.left + Px(14) + cell.iconPx, cell.rect.top,
                                                              cell.rect.right - Px(8), cell.rect.bottom);
-                    dc->DrawTextW(e.name.c_str(), static_cast<UINT32>(e.name.size()), fontRow_.get(), nameRect, text.get(),
+                    dc->DrawTextW(name.c_str(), static_cast<UINT32>(name.size()), fontRow_.get(), nameRect, text.get(),
                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
                 }
             }
@@ -486,6 +526,13 @@ private:
             case WM_LBUTTONUP: {
                 GetCursorPos(&p);
                 const int i = CellAt(p);
+                if (o_.held && firstRelease_) {
+                    // Opened by press-and-hold: letting go over a file opens it, anywhere else keeps the stack open.
+                    firstRelease_ = false;
+                    if (i >= 0) OpenCell(i);
+                    handled = true;
+                    return 0;
+                }
                 if (i >= 0 && i == pressed_) OpenCell(i);
                 pressed_ = -1;
                 handled = true;
@@ -518,7 +565,8 @@ private:
     wuc::SpriteVisual panelSprite_{nullptr};
     int panelW_ = 0, panelH_ = 0;
     std::wstring title_, linkText_;
-    winrt::com_ptr<IDWriteTextFormat> fontPill_, fontName_, fontRow_, fontTitle_, fontLink_;
+    winrt::com_ptr<IDWriteTextFormat> fontPill_, fontName_, fontRow_, fontTitle_, fontLink_, fontTitleCenter_, fontGlyph_;
+    bool firstRelease_ = true;
     int hover_ = -1;
     int pressed_ = -1;
     POINT pressPt_{};

@@ -3,6 +3,7 @@
 #include <initguid.h>  // must come before propkey.h so PKEY_* are defined here
 #include <appmodel.h>
 #include <dwmapi.h>
+#include <knownfolders.h>
 #include <propkey.h>
 #include <propvarutil.h>
 #include <shellapi.h>
@@ -237,6 +238,47 @@ bool IsAppsFolderItem(const std::wstring& aumid) {
     if (aumid.empty()) return false;
     winrt::com_ptr<IShellItem> item;
     return SUCCEEDED(SHCreateItemFromParsingName((L"shell:AppsFolder\\" + aumid).c_str(), nullptr, IID_PPV_ARGS(item.put())));
+}
+
+namespace {
+std::wstring SelfPath() {
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    return exe;
+}
+
+void MakeShortcut(const std::wstring& lnk, const std::wstring& target) {
+    winrt::com_ptr<IShellLinkW> link;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(link.put())))) return;
+    link->SetPath(target.c_str());
+    const std::wstring dir = target.substr(0, target.find_last_of(L'\\'));
+    link->SetWorkingDirectory(dir.c_str());
+    link->SetDescription(L"DockX");
+    if (FAILED(link.as<IPersistFile>()->Save(lnk.c_str(), TRUE))) Log(L"Could not create %s", lnk.c_str());
+}
+}  // namespace
+
+void SetStartWithWindows(bool on) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS)
+        return;
+    if (on) {
+        const std::wstring cmd = L"\"" + SelfPath() + L"\"";
+        RegSetValueExW(key, L"DockX", 0, REG_SZ, reinterpret_cast<const BYTE*>(cmd.c_str()),
+                       static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
+    } else {
+        RegDeleteValueW(key, L"DockX");
+    }
+    RegCloseKey(key);
+}
+
+void CreateAppShortcuts() {
+    const std::wstring exe = SelfPath();
+    for (const KNOWNFOLDERID& folder : {FOLDERID_Programs, FOLDERID_Desktop}) {
+        PWSTR dir = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(folder, 0, nullptr, &dir))) MakeShortcut(std::wstring(dir) + L"\\DockX.lnk", exe);
+        CoTaskMemFree(dir);
+    }
 }
 
 std::vector<PinnedItem> DefaultPinnedApps() {

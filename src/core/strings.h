@@ -48,6 +48,7 @@ enum class Text {
     RemoveFromDock,
     ShowRecent,
     EmptyFolder,
+    StartWithWindows,
 };
 void SetLanguage(std::string_view lang);
 const wchar_t* Tr(Text t);

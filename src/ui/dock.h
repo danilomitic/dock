@@ -143,7 +143,8 @@ private:
     void TrimRecent();
     void SaveRecent();
     void SaveStacks();
-    void ShowStack(int itemId);
+    void ShowStack(int itemId, bool held = false);
+    bool AreApps(const std::vector<std::wstring>& files) const;
     void CreateItemVisuals(DockItem& it);
     void RequestIcon(DockItem& it);
     void SetIconBitmap(DockItem& it, IWICBitmap* bmp);

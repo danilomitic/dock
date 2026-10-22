@@ -92,6 +92,8 @@ Config ParseConfig(std::string_view text) {
     c.attentionBounce = v.Bool("attentionBounce", c.attentionBounce);
     c.animationSpeed = Clamp(v.Num("animationSpeed", c.animationSpeed), 0.25, 4);
     c.logging = v.Bool("logging", c.logging);
+    c.startWithWindows = v.Bool("startWithWindows", c.startWithWindows);
+    c.shortcutsCreated = v.Bool("shortcutsCreated", c.shortcutsCreated);
     c.showRecent = v.Bool("showRecent", c.showRecent);
     c.recentCount = static_cast<int>(Clamp(v.Num("recentCount", c.recentCount), 0, 10));
     c.showTrash = v.Bool("showTrash", c.showTrash);
@@ -164,6 +166,8 @@ std::string SerializeConfig(const Config& c) {
     kv("attentionBounce", b(c.attentionBounce));
     kv("animationSpeed", json::Number(c.animationSpeed));
     kv("logging", b(c.logging));
+    kv("startWithWindows", b(c.startWithWindows));
+    kv("shortcutsCreated", b(c.shortcutsCreated));
     kv("showRecent", b(c.showRecent));
     kv("recentCount", json::Number(c.recentCount));
     kv("showTrash", b(c.showTrash));

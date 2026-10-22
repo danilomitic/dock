@@ -74,6 +74,7 @@ const wchar_t* Tr(Text t) {
         case Text::RemoveFromDock: return g_serbian ? L"Ukloni iz Docka" : L"Remove from Dock";
         case Text::ShowRecent: return g_serbian ? L"Prikaži nedavne aplikacije" : L"Show recent apps";
         case Text::EmptyFolder: return g_serbian ? L"Prazno" : L"Empty";
+        case Text::StartWithWindows: return g_serbian ? L"Pokreni sa Windowsom" : L"Start with Windows";
     }
     return L"";
 }

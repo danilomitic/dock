@@ -53,6 +53,10 @@ public:
 
     ShadowBrush CreateShadow(float radius, float sigma) const;
 
+    // Any Direct2D shape as a composition geometry (for clips and outlines).
+    wuc::CompositionPathGeometry CreatePathGeometry(ID2D1Geometry* geometry) const;
+    [[nodiscard]] ID2D1Factory1* D2DFactory() const { return d2dFactory_.get(); }
+
     // A composition tree for another window (menus, popups) sharing this compositor.
     wuc::ContainerVisual AttachWindow(HWND hwnd);
     void DetachWindow(HWND hwnd);

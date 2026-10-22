@@ -51,6 +51,8 @@ struct Config {
     double animationSpeed = 1.0;      // global multiplier
 
     bool logging = false;
+    bool startWithWindows = true;
+    bool shortcutsCreated = false;    // internal: Start menu + desktop shortcuts made once
 
     // Right side of the dock
     bool showRecent = true;           // running + recently used apps after a separator (macOS default)

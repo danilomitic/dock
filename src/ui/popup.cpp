@@ -1,5 +1,6 @@
 #include "ui/popup.h"
 
+#include <d2d1_1helper.h>
 #include <dwmapi.h>
 
 #include <algorithm>
@@ -89,6 +90,12 @@ void GlassPopup::Style(bool dark, float radius, float scale) {
     margin_ = static_cast<int>(std::ceil(sb.extent + 4 * scale));
 }
 
+void GlassPopup::SetBeak(Edge dockEdge, POINT target) {
+    beak_ = true;
+    beakEdge_ = dockEdge;
+    beakTarget_ = target;
+}
+
 void GlassPopup::Place(int x, int y, int w, int h) {
     x_ = x;
     y_ = y;
@@ -96,16 +103,71 @@ void GlassPopup::Place(int x, int y, int w, int h) {
     h_ = h;
     const float m = static_cast<float>(margin_);
     const float fw = static_cast<float>(w), fh = static_cast<float>(h);
+    const float bh = beak_ ? std::round(10 * scale_) : 0;  // beak length
+    const float bw = std::round(22 * scale_);              // beak base width
     box_.Offset({m, m, 0});
     box_.Size({fw, fh});
+    content_.RelativeSizeAdjustment({0, 0});
+    content_.Size({fw, fh});
+    RECT beakRect{};
     if (glass_) {
-        clipGeom_.Size({fw, fh});
-        clipGeom_.CornerRadius({radius_, radius_});
+        // The glass also covers the beak, so it reaches past the body on every side.
+        backdrop_.RelativeSizeAdjustment({0, 0});
+        backdrop_.Offset({-bh, -bh, 0});
+        backdrop_.Size({fw + 2 * bh, fh + 2 * bh});
+        tint_.RelativeSizeAdjustment({0, 0});
+        tint_.Offset({-bh, -bh, 0});
+        tint_.Size({fw + 2 * bh, fh + 2 * bh});
         border_.Offset({m, m, 0});
         border_.Size({fw, fh});
-        borderGeom_.Offset({0.5f, 0.5f});
-        borderGeom_.Size({fw - 1, fh - 1});
-        borderGeom_.CornerRadius({std::max(0.0f, radius_ - 0.5f), std::max(0.0f, radius_ - 0.5f)});
+        if (beak_) {
+            // Body + pointer as one shape: clip, border and hit area.
+            auto* factory = gfx_->D2DFactory();
+            winrt::com_ptr<ID2D1RoundedRectangleGeometry> body;
+            factory->CreateRoundedRectangleGeometry(D2D1::RoundedRect(D2D1::RectF(0, 0, fw, fh), radius_, radius_), body.put());
+            D2D1_POINT_2F p0{}, p1{}, tip{};
+            if (beakEdge_ == Edge::Bottom) {
+                const float bx = std::clamp(static_cast<float>(beakTarget_.x - x), radius_ + bw, fw - radius_ - bw);
+                p0 = {bx - bw / 2, fh - 1};
+                p1 = {bx + bw / 2, fh - 1};
+                tip = {bx, fh + bh};
+                beakRect = {margin_ + static_cast<LONG>(bx - bw / 2), margin_ + h - 1, margin_ + static_cast<LONG>(bx + bw / 2),
+                            margin_ + h + static_cast<LONG>(bh)};
+            } else {
+                const float by = std::clamp(static_cast<float>(beakTarget_.y - y), radius_ + bw, fh - radius_ - bw);
+                const bool left = beakEdge_ == Edge::Left;  // dock on the left: beak on our left side
+                const float sideX = left ? 1.0f : fw - 1;
+                p0 = {sideX, by - bw / 2};
+                p1 = {sideX, by + bw / 2};
+                tip = {left ? -bh : fw + bh, by};
+                beakRect = {margin_ + static_cast<LONG>(left ? -bh : fw - 1), margin_ + static_cast<LONG>(by - bw / 2),
+                            margin_ + static_cast<LONG>(left ? 1 : fw + bh), margin_ + static_cast<LONG>(by + bw / 2)};
+            }
+            winrt::com_ptr<ID2D1PathGeometry> triangle;
+            factory->CreatePathGeometry(triangle.put());
+            winrt::com_ptr<ID2D1GeometrySink> sink;
+            triangle->Open(sink.put());
+            sink->BeginFigure(p0, D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(tip);
+            sink->AddLine(p1);
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+            winrt::com_ptr<ID2D1PathGeometry> shape;
+            factory->CreatePathGeometry(shape.put());
+            winrt::com_ptr<ID2D1GeometrySink> shapeSink;
+            shape->Open(shapeSink.put());
+            body->CombineWithGeometry(triangle.get(), D2D1_COMBINE_MODE_UNION, nullptr, shapeSink.get());
+            shapeSink->Close();
+            box_.Clip(gfx_->Comp().CreateGeometricClip(gfx_->CreatePathGeometry(shape.get())));
+            borderShape_.Geometry(gfx_->CreatePathGeometry(shape.get()));
+            borderShape_.Offset({0.5f, 0.5f});
+        } else {
+            clipGeom_.Size({fw, fh});
+            clipGeom_.CornerRadius({radius_, radius_});
+            borderGeom_.Offset({0.5f, 0.5f});
+            borderGeom_.Size({fw - 1, fh - 1});
+            borderGeom_.CornerRadius({std::max(0.0f, radius_ - 0.5f), std::max(0.0f, radius_ - 0.5f)});
+        }
         const float e = shadowExtent_;
         shadow_.Offset({m - e, m - e + 3 * scale_, 0});
         shadow_.Size({fw + 2 * e, fh + 2 * e});
@@ -113,6 +175,11 @@ void GlassPopup::Place(int x, int y, int w, int h) {
     SetWindowPos(hwnd_, HWND_TOPMOST, x - margin_, y - margin_, w + 2 * margin_, h + 2 * margin_, SWP_NOACTIVATE);
     // Only the glass takes the mouse; the shadow margin lets clicks through.
     HRGN rgn = CreateRectRgn(margin_, margin_, margin_ + w, margin_ + h);
+    if (beak_) {
+        HRGN extra = CreateRectRgnIndirect(&beakRect);
+        CombineRgn(rgn, rgn, extra, RGN_OR);
+        DeleteObject(extra);
+    }
     if (!SetWindowRgn(hwnd_, rgn, FALSE)) DeleteObject(rgn);
 }
 

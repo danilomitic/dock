@@ -4,6 +4,7 @@
 #include <functional>
 
 #include "render/graphics.h"
+#include "ui/layout.h"
 
 namespace dx {
 
@@ -25,6 +26,8 @@ public:
 
     // Colors, corner radius and shadow. Call before Place.
     void Style(bool dark, float radius, float scale);
+    // A small pointer on the side facing the dock, aimed at `target` (screen px). Call before Place.
+    void SetBeak(Edge dockEdge, POINT target);
     // The glass rectangle in screen pixels (the window is a bit larger, for the shadow).
     void Place(int x, int y, int w, int h);
     void MoveTo(int x, int y);  // same size, new position (cheap; used while dragging)
@@ -58,6 +61,9 @@ private:
     wuc::CompositionRoundedRectangleGeometry borderGeom_{nullptr};
     wuc::CompositionSpriteShape borderShape_{nullptr};
 
+    bool beak_ = false;
+    Edge beakEdge_ = Edge::Bottom;
+    POINT beakTarget_{};
     float radius_ = 10;
     float scale_ = 1;
     float shadowExtent_ = 0;

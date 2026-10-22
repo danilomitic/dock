@@ -3,6 +3,7 @@
 #include <DispatcherQueue.h>
 #include <d2d1_1helper.h>
 #include <d2d1effects.h>
+#include <windows.graphics.interop.h>
 #include <windows.ui.composition.interop.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 
@@ -103,6 +104,28 @@ ShadowBrush Graphics::CreateShadow(float radius, float sigma) const {
     out.brush.SetInsets(inset);
     out.extent = ext;
     return out;
+}
+
+namespace {
+// Hands a Direct2D geometry to Windows.UI.Composition.
+struct GeometrySource : winrt::implements<GeometrySource, winrt::Windows::Graphics::IGeometrySource2D,
+                                          ABI::Windows::Graphics::IGeometrySource2DInterop> {
+    explicit GeometrySource(ID2D1Geometry* g) { geometry.copy_from(g); }
+    HRESULT __stdcall GetGeometry(ID2D1Geometry** value) override {
+        geometry.copy_to(value);
+        return S_OK;
+    }
+    HRESULT __stdcall TryGetGeometryUsingFactory(ID2D1Factory*, ID2D1Geometry** value) override {
+        *value = nullptr;
+        return E_NOTIMPL;
+    }
+    winrt::com_ptr<ID2D1Geometry> geometry;
+};
+}  // namespace
+
+wuc::CompositionPathGeometry Graphics::CreatePathGeometry(ID2D1Geometry* geometry) const {
+    const wuc::CompositionPath path(winrt::make<GeometrySource>(geometry));
+    return compositor_.CreatePathGeometry(path);
 }
 
 wuc::ContainerVisual Graphics::AttachWindow(HWND hwnd) {

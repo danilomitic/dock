@@ -41,4 +41,9 @@ bool IsAppsFolderItem(const std::wstring& aumid);
 
 std::vector<PinnedItem> DefaultPinnedApps();
 
+// Start DockX when you sign in (HKCU\...\Run).
+void SetStartWithWindows(bool on);
+// "DockX" in the Start menu and on the desktop.
+void CreateAppShortcuts();
+
 }  // namespace dx

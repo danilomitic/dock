@@ -47,7 +47,7 @@ enum : UINT {
     kCmdKeep = 1, kCmdShow, kCmdClose, kCmdForceQuit, kCmdHide, kCmdOpen, kCmdExpose,
     kCmdMagnify, kCmdDark, kCmdAutoHide, kCmdPosLeft, kCmdPosBottom, kCmdPosRight, kCmdHideTaskbar, kCmdQuitDock,
     kCmdOpenStack, kCmdRemoveStack, kCmdSortName, kCmdSortAdded, kCmdSortModified, kCmdSortKind,
-    kCmdViewFan, kCmdViewGrid, kCmdViewList, kCmdViewAuto, kCmdOpenTrash, kCmdEmptyTrash, kCmdRecent,
+    kCmdViewFan, kCmdViewGrid, kCmdViewList, kCmdViewAuto, kCmdOpenTrash, kCmdEmptyTrash, kCmdRecent, kCmdStartup,
     kCmdWindow = 100
 };
 
@@ -198,6 +198,12 @@ bool Dock::Create(HINSTANCE instance) {
     foregroundHook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, WinEventProc, 0, 0,
                                       WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     RegisterDropTargets();
+    SetStartWithWindows(cfg_.startWithWindows);
+    if (!cfg_.shortcutsCreated) {
+        CreateAppShortcuts();
+        cfg_.shortcutsCreated = true;
+        SaveConfig(cfg_);
+    }
 
     // Watch the Recycle Bin so its icon shows empty / full.
     PIDLIST_ABSOLUTE bin = nullptr;
@@ -542,10 +548,11 @@ void Dock::SaveStacks() {
     SaveConfig(cfg_);
 }
 
-void Dock::ShowStack(int itemId) {
+void Dock::ShowStack(int itemId, bool held) {
     DockItem* it = FindItem(itemId);
     if (!it) return;
     StackOptions o;
+    o.held = held;
     o.folder = it->path;
     o.view = cfg_.stackView;
     o.sort = cfg_.stackSort;
@@ -682,6 +689,20 @@ void Dock::PinAt(const std::wstring& path, double u) {
     const bool folder = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
     for (const auto& it : items_)
         if (Lower(it->path) == Lower(path) && (folder ? it->kind == DockItem::Kind::Stack : it->pinned)) return;  // already there
+    if (!folder) {
+        // The same app may already be in the dock (pinned, or open as a recent app).
+        const std::wstring exe = Lower(EndsWith(path, L".lnk") ? ReadShortcut(path).target : path);
+        for (auto& it : items_) {
+            if (it->kind != DockItem::Kind::App || exe.empty() || it->matchExe != exe) continue;
+            if (!it->pinned) {
+                it->pinned = true;
+                NormalizeOrder();
+                SavePinned();
+                SaveRecent();
+            }
+            return;
+        }
+    }
     int index = static_cast<int>(items_.size());
     for (size_t i = 0; i < items_.size() && i < itemEntry_.size(); ++i)
         if (itemEntry_[i] >= 0 && u < layout_.center[itemEntry_[i]]) {
@@ -854,9 +875,12 @@ void Dock::OnLeftDown() {
     pressedId_ = hoverId_;
     pressX_ = mouseX_;
     pressY_ = mouseY_;
-    if (DockItem* it = FindItem(pressedId_)) it->dim.Opacity(0.3f);
+    const DockItem* pressed = FindItem(pressedId_);
+    if (pressed) pressed->dim.Opacity(0.3f);
     SetCapture(hwnd_);
-    SetTimer(hwnd_, kTimerHold, kHoldMs, nullptr);
+    // Holding a Stack opens it quickly (then let go over a file to open it).
+    const bool stack = pressed && pressed->kind == DockItem::Kind::Stack;
+    SetTimer(hwnd_, kTimerHold, stack ? 250 : kHoldMs, nullptr);
     UpdateLabel();
 }
 
@@ -903,7 +927,8 @@ void Dock::OnHoldTimer() {
     DockItem* it = FindItem(id);
     if (!it) return;
     it->dim.Opacity(0);
-    if (!it->windows.empty()) ShowExpose(id);
+    if (it->kind == DockItem::Kind::Stack) ShowStack(id, true);
+    else if (!it->windows.empty()) ShowExpose(id);
     else ShowItemMenu(id);
 }
 
@@ -1099,6 +1124,7 @@ void Dock::ShowDockMenu() {
     items.push_back(Item(Tr(Text::ShowRecent), kCmdRecent, cfg_.showRecent));
     items.push_back(Item(Tr(Text::HideTaskbar), kCmdHideTaskbar, cfg_.hideTaskbar));
     items.push_back(Item(Tr(Text::DarkTheme), kCmdDark, Dark()));
+    items.push_back(Item(Tr(Text::StartWithWindows), kCmdStartup, cfg_.startWithWindows));
     items.push_back(MenuItem::Separator());
     items.push_back(Item(Tr(Text::QuitDock), kCmdQuitDock));
 
@@ -1137,6 +1163,11 @@ void Dock::ShowDockMenu() {
             cfg_.hideTaskbar = !cfg_.hideTaskbar;
             SaveConfig(cfg_);
             ApplyTaskbarSetting();
+            break;
+        case kCmdStartup:
+            cfg_.startWithWindows = !cfg_.startWithWindows;
+            SaveConfig(cfg_);
+            SetStartWithWindows(cfg_.startWithWindows);
             break;
         case kCmdRecent:
             cfg_.showRecent = !cfg_.showRecent;
@@ -1366,12 +1397,19 @@ void Dock::UpdatePoof(double t) {
 
 // ---------------------------------------------------------------- Files dropped from Explorer
 
+// Apps and shortcuts (from the desktop, the Start menu, Explorer).
+bool Dock::AreApps(const std::vector<std::wstring>& files) const {
+    if (files.empty()) return false;
+    return std::all_of(files.begin(), files.end(), [](const std::wstring& f) {
+        return EndsWith(f, L".exe") || EndsWith(f, L".lnk") || EndsWith(f, L".url") || EndsWith(f, L".appref-ms");
+    });
+}
+
 bool Dock::CanPin(const std::vector<std::wstring>& files) const {
+    if (AreApps(files)) return true;
     if (files.size() != 1) return false;
-    const std::wstring& f = files[0];
-    const DWORD attrs = GetFileAttributesW(f.c_str());
-    return EndsWith(f, L".exe") || EndsWith(f, L".lnk") ||
-           (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY));
+    const DWORD attrs = GetFileAttributesW(files[0].c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
 
 void Dock::SetDropHighlight(int itemId) {
@@ -1397,6 +1435,14 @@ DWORD Dock::DropOver(POINT screen) {
     StartAnimating();
     const int idx = mouseV_ <= m_.margin + m_.shelfH + m_.maxIcon ? HitTest(mouseU_) : -1;
     DockItem* it = idx >= 0 ? items_[idx].get() : nullptr;
+    // Apps and shortcuts are added to the dock wherever they are dropped
+    // (only the Recycle Bin and Stacks take them as files).
+    if (AreApps(dropFiles_) && !(it && it->kind != DockItem::Kind::App)) {
+        SetDropHighlight(0);
+        hoverId_ = 0;
+        UpdateLabel();
+        return DROPEFFECT_LINK;
+    }
     SetDropHighlight(it ? it->id : 0);
     hoverId_ = it ? it->id : 0;
     UpdateLabel();
@@ -1434,7 +1480,7 @@ DWORD Dock::DropFiles(const std::vector<std::wstring>& files, POINT screen) {
             ScheduleRescan(true);
         }
     } else if (effect == DROPEFFECT_LINK) {
-        PinAt(files[0], mouseU_);
+        for (const auto& f : files) PinAt(f, mouseU_);
     }
     DropLeave();
     return effect;
