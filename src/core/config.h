@@ -66,6 +66,7 @@ struct Config {
     std::string stackSort = "dateAdded";  // "dateAdded" | "name" | "dateModified" | "kind"
 
     bool loadFailed = false;  // not saved: the file existed but could not be read
+    std::wstring loadInfo;    // not saved: how loading went (written to startup.log)
 
     bool pinnedInitialized = false;
     std::vector<PinnedItem> pinned;

@@ -210,17 +210,29 @@ std::string SerializeConfig(const Config& c) {
 }
 
 namespace {
-std::optional<Config> ReadConfigFile(const std::wstring& path) {
+// `why` says what went wrong (for startup.log).
+std::optional<Config> ReadConfigFile(const std::wstring& path, std::wstring& why) {
     // Shared read: another program (antivirus, backup, DockX Settings) may have it open.
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return std::nullopt;
+    if (h == INVALID_HANDLE_VALUE) {
+        why = L"open failed, error " + std::to_wstring(GetLastError());
+        return std::nullopt;
+    }
     std::string text;
     char buf[8192];
     DWORD got = 0;
     while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) text.append(buf, got);
     CloseHandle(h);
-    return TryParseConfig(text);
+    auto c = TryParseConfig(text);
+    if (!c) why = L"not valid JSON (" + std::to_wstring(text.size()) + L" bytes)";
+    return c;
+}
+
+bool Missing(const std::wstring& path) {
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+    const DWORD e = GetLastError();
+    return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
 }
 }  // namespace
 
@@ -230,19 +242,37 @@ std::wstring ConfigBackupPath() { return ConfigDir() + L"\\config.backup.json"; 
 // retries, then falls back to the backup. If both fail, the result is marked
 // `loadFailed` and SaveConfig refuses to overwrite the user's file with it.
 Config LoadConfig() {
+    const std::wstring dir = ConfigDir();
+    if (dir.empty()) {  // Windows could not tell us where AppData is (yet)
+        Config c;
+        c.loadFailed = true;
+        c.loadInfo = L"AppData folder not available";
+        return c;
+    }
     const std::wstring path = ConfigPath();
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
-        GetFileAttributesW(ConfigBackupPath().c_str()) == INVALID_FILE_ATTRIBUTES)
-        return Config{};  // first run
+    // A real first run only when both files are definitely not there.
+    if (Missing(path) && Missing(ConfigBackupPath())) {
+        Config c;
+        c.loadInfo = L"first run (no config yet)";
+        return c;
+    }
+    std::wstring why;
     for (int attempt = 0; attempt < 10; ++attempt) {
-        if (auto c = ReadConfigFile(path)) return *c;
+        if (auto c = ReadConfigFile(path, why)) {
+            c->loadInfo = attempt ? L"ok after " + std::to_wstring(attempt + 1) + L" tries" : L"ok";
+            return *c;
+        }
         Sleep(100);
     }
-    Log(L"config.json could not be read; trying the backup");
-    if (auto c = ReadConfigFile(ConfigBackupPath())) return *c;
-    Log(L"config backup could not be read either; settings will not be saved this session");
+    std::wstring backupWhy;
+    if (auto c = ReadConfigFile(ConfigBackupPath(), backupWhy)) {
+        c->loadInfo = L"config.json: " + why + L"; used the backup";
+        return *c;
+    }
     Config c;
     c.loadFailed = true;
+    c.loadInfo = L"config.json: " + why + L"; backup: " + backupWhy;
+    Log(L"Settings could not be read: %s", c.loadInfo.c_str());
     return c;
 }
 
@@ -251,7 +281,8 @@ bool SaveConfig(const Config& c) {
     const std::wstring path = ConfigPath();
     const std::wstring tmp = path + L".tmp";
     // Keep the previous good version as a backup.
-    if (ReadConfigFile(path)) CopyFileW(path.c_str(), ConfigBackupPath().c_str(), FALSE);
+    std::wstring why;
+    if (ReadConfigFile(path, why)) CopyFileW(path.c_str(), ConfigBackupPath().c_str(), FALSE);
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return false;

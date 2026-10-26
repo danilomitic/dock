@@ -19,12 +19,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         LocalFree(argv);
         return dx::RunWatchdog(pid, hwnd);
     }
+    const bool restart = argv && argc >= 2 && std::wstring(argv[1]) == L"--restart";
     if (argv) LocalFree(argv);
 
     // One dock at a time. Starting DockX again while it runs shows the dock and opens DockX Settings,
     // so it never looks like "nothing happened".
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\DockX.SingleInstance");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+    if (GetLastError() == ERROR_ALREADY_EXISTS && restart && mutex) {
+        // The old dock is quitting to make room for us: wait for it.
+        const DWORD r = WaitForSingleObject(mutex, 15000);
+        if (r != WAIT_OBJECT_0 && r != WAIT_ABANDONED) {
+            CloseHandle(mutex);
+            return 0;
+        }
+    } else if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (mutex) CloseHandle(mutex);
         if (HWND dock = FindWindowW(L"DockX.Window", nullptr)) {
             AllowSetForegroundWindow(ASFW_ANY);

@@ -12,6 +12,7 @@
 #include <numbers>
 #include <unordered_map>
 
+#include <share.h>
 #include <shlobj.h>
 
 #include "core/log.h"
@@ -32,6 +33,7 @@ constexpr UINT_PTR kTimerShow = 3;
 constexpr UINT_PTR kTimerHide = 4;
 constexpr UINT_PTR kTimerHold = 5;
 constexpr UINT_PTR kTimerTrash = 6;
+constexpr UINT_PTR kTimerConfigRetry = 7;
 constexpr int kSidStackRecycler = 31;      // SIID_RECYCLER
 constexpr int kSidStackRecyclerFull = 32;  // SIID_RECYCLERFULL
 
@@ -56,6 +58,9 @@ float F(double v) { return static_cast<float>(v); }
 bool EndsWith(const std::wstring& s, const wchar_t* suffix) { return Lower(s).ends_with(suffix); }
 
 UINT Ms(double seconds) { return static_cast<UINT>(std::max(1.0, seconds * 1000)); }
+
+// "c:\program files\mozilla firefox\firefox.exe" -> "firefox.exe"
+std::wstring ExeName(const std::wstring& path) { return path.substr(path.find_last_of(L'\\') + 1); }
 
 MenuItem Item(const wchar_t* text, UINT id, bool checked = false) {
     MenuItem m;
@@ -149,10 +154,37 @@ Dock::~Dock() {
     g_dock = nullptr;
 }
 
+namespace {
+// One line per start in %LOCALAPPDATA%\DockX\startup.log (always on, a few KB at most),
+// so a dock that comes up without the user's apps can be explained.
+void StartupNote(const std::wstring& text) {
+    PWSTR base = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base))) return;
+    std::wstring dir = std::wstring(base) + L"\\DockX";
+    CoTaskMemFree(base);
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring path = dir + L"\\startup.log";
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    const bool big = GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa) && fa.nFileSizeLow > 64 * 1024;
+    FILE* f = _wfsopen(path.c_str(), big ? L"w, ccs=UTF-8" : L"a, ccs=UTF-8", _SH_DENYNO);
+    if (!f) return;
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    fwprintf(f, L"%04d-%02d-%02d %02d:%02d:%02d  %s\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, text.c_str());
+    fclose(f);
+}
+}  // namespace
+
 bool Dock::Create(HINSTANCE instance) {
     g_dock = this;
     QueryPerformanceFrequency(&qpcFreq_);
     cfg_ = LoadConfig();
+    // Right after Windows starts, the settings file can be unavailable for a moment.
+    // Wait for it (up to a minute) rather than showing a dock without the user's apps.
+    for (int i = 0; cfg_.loadFailed && i < 60; ++i) {
+        Sleep(1000);
+        cfg_ = LoadConfig();
+    }
     EnableFileLog(cfg_.logging);
     SetLanguage(cfg_.language);
 
@@ -237,6 +269,10 @@ bool Dock::Create(HINSTANCE instance) {
     }
     StartWatchdog(hwnd_);
     Log(L"DockX started: %d items, scale %.2f, edge %S", static_cast<int>(items_.size()), m_.scale, cfg_.position.c_str());
+    StartupNote(L"settings: " + cfg_.loadInfo + L"  |  pinned apps: " + std::to_wstring(cfg_.pinned.size()) +
+                L"  |  dock items: " + std::to_wstring(items_.size()));
+    // Still unreadable: keep trying, and restart with the real settings as soon as they can be read.
+    if (cfg_.loadFailed) SetTimer(hwnd_, kTimerConfigRetry, 5000, nullptr);
     return true;
 }
 
@@ -952,9 +988,20 @@ void Dock::Rescan() {
         if (!aumid.empty())
             for (auto& it : items_)
                 if (it->matchAumid == aumid) { target = it.get(); break; }
-        if (!target && !w.packaged && !exe.empty())
+        if (!target && !w.packaged && !exe.empty()) {
+            // Pinned apps first: the exact program, then the same program name (a pinned copy or
+            // shortcut can live in another folder, e.g. Desktop\Firefox.exe vs Program Files),
+            // and only then a recent app with that exact path.
+            const std::wstring name = ExeName(exe);
             for (auto& it : items_)
-                if (it->matchExe == exe) { target = it.get(); break; }
+                if (it->pinned && it->matchExe == exe) { target = it.get(); break; }
+            if (!target)
+                for (auto& it : items_)
+                    if (it->pinned && !it->matchExe.empty() && ExeName(it->matchExe) == name) { target = it.get(); break; }
+            if (!target)
+                for (auto& it : items_)
+                    if (it->matchExe == exe) { target = it.get(); break; }
+        }
         if (!target) {
             target = w.packaged ? &AddItem(false, L"", w.aumid, initialized_) : &AddItem(false, w.exe, w.aumid, initialized_);
         }
@@ -976,6 +1023,18 @@ void Dock::Rescan() {
             }
             if (it->bouncing && !it->attention) it->stopBounce = true;
         } else if (!it->pinned && !it->removing && !cfg_.showRecent) {
+            it->removing = true;
+            it->presence.target = 0;
+        }
+    }
+    // A recent app that is the same program as a pinned one is a duplicate: drop it.
+    for (auto& it : items_) {
+        if (it->kind != DockItem::Kind::App || it->pinned || it->removing || !it->windows.empty() || it->matchExe.empty()) continue;
+        const std::wstring name = ExeName(it->matchExe);
+        const bool dup = std::any_of(items_.begin(), items_.end(), [&](const auto& p) {
+            return p->pinned && p->kind == DockItem::Kind::App && !p->matchExe.empty() && ExeName(p->matchExe) == name;
+        });
+        if (dup) {
             it->removing = true;
             it->presence.target = 0;
         }
@@ -2332,6 +2391,25 @@ LRESULT Dock::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case kTimerTrash:
                     UpdateTrash();
+                    break;
+                case kTimerConfigRetry:
+                    if (LoadConfig().loadFailed) {
+                        SetTimer(hwnd_, kTimerConfigRetry, 5000, nullptr);
+                    } else {
+                        // The settings are readable now: start again with them (the new copy
+                        // waits for this one to quit).
+                        StartupNote(L"settings became readable; restarting with them");
+                        wchar_t exe[MAX_PATH]{};
+                        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+                        std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --restart";
+                        STARTUPINFOW si{sizeof(si)};
+                        PROCESS_INFORMATION pi{};
+                        if (CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+                            CloseHandle(pi.hThread);
+                            CloseHandle(pi.hProcess);
+                            DestroyWindow(hwnd_);
+                        }
+                    }
                     break;
                 default:
                     Rescan();
