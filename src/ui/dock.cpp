@@ -9,7 +9,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <numbers>
+#include <sstream>
 #include <unordered_map>
 
 #include <share.h>
@@ -175,9 +177,56 @@ void StartupNote(const std::wstring& text) {
 }
 }  // namespace
 
+namespace {
+// When DockX (or DockX Settings) is started from inside a packaged (MSIX) app, Windows
+// silently redirects its AppData into that app's private folder
+// (%LOCALAPPDATA%\Packages\<app>\LocalCache\Roaming\DockX). Settings made there are
+// invisible when Windows itself starts the dock. Bring the newest such copy home.
+void ImportSettingsFromAppPackages() {
+    PWSTR base = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base))) return;
+    const std::wstring packages = std::wstring(base) + L"\\Packages\\";
+    CoTaskMemFree(base);
+    const std::wstring real = ConfigPath();
+    auto writeTime = [](const std::wstring& p) -> ULONGLONG {
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fa)) return 0;
+        return (static_cast<ULONGLONG>(fa.ftLastWriteTime.dwHighDateTime) << 32) | fa.ftLastWriteTime.dwLowDateTime;
+    };
+    std::wstring best;
+    ULONGLONG bestTime = writeTime(real);
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileExW((packages + L"*").c_str(), FindExInfoBasic, &fd, FindExSearchLimitToDirectories, nullptr, 0);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+        const std::wstring candidate = packages + fd.cFileName + L"\\LocalCache\\Roaming\\DockX\\config.json";
+        if (Lower(candidate) == Lower(real)) continue;  // we are the redirected copy ourselves
+        const ULONGLONG t = writeTime(candidate);
+        if (t > bestTime) {
+            best = candidate;
+            bestTime = t;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    if (best.empty()) return;
+    std::ifstream in(best, std::ios::binary);
+    std::stringstream text;
+    text << in.rdbuf();
+    in.close();
+    if (!TryParseConfig(text.str())) return;
+    CopyFileW(real.c_str(), (ConfigDir() + L"\\config.before-import.json").c_str(), FALSE);
+    if (CopyFileW(best.c_str(), real.c_str(), FALSE)) {
+        MoveFileExW(best.c_str(), (best + L".imported").c_str(), MOVEFILE_REPLACE_EXISTING);
+        StartupNote(L"imported settings from " + best);
+    }
+}
+}  // namespace
+
 bool Dock::Create(HINSTANCE instance) {
     g_dock = this;
     QueryPerformanceFrequency(&qpcFreq_);
+    ImportSettingsFromAppPackages();
     cfg_ = LoadConfig();
     // Right after Windows starts, the settings file can be unavailable for a moment.
     // Wait for it (up to a minute) rather than showing a dock without the user's apps.
