@@ -104,6 +104,8 @@ private:
     void Export();
     void Import();
     void RestartDock();
+    void QuitDock();
+    void StartDock();
 
     HWND hwnd_ = nullptr;
     Config cfg_;
@@ -466,20 +468,40 @@ void App::Sidebar() {
         y += 38;
     }
 
-    // Dock status at the bottom.
-    const D2D1_RECT_F st = D2D1::RectF(16, H_ - 92, kSidebarW - 16, H_ - 64);
+    // Dock status at the bottom, with Start / Restart and Quit.
+    const float top = dockRunning_ ? H_ - 130 : H_ - 92;
+    const D2D1_RECT_F st = D2D1::RectF(16, top, kSidebarW - 16, top + 28);
     brush_->SetColor(dockRunning_ ? D2D1::ColorF(0.2f, 0.78f, 0.35f) : D2D1::ColorF(0.9f, 0.3f, 0.3f));
     rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(st.left + 6, (st.top + st.bottom) / 2), 4.5f, 4.5f), brush_.get());
     Text(dockRunning_ ? L(L"Dock radi", L"Dock is running") : L(L"Dock nije pokrenut", L"Dock is not running"),
          D2D1::RectF(st.left + 18, st.top, st.right, st.bottom), fSub_.get(), Ink(0.7f));
-    const D2D1_RECT_F b = D2D1::RectF(16, H_ - 58, kSidebarW - 16, H_ - 24);
-    const int id = NextId();
-    Fill(b, id == hot_ ? Ink(0.14f) : Ink(0.09f), 7);
-    Text(dockRunning_ ? L(L"Restartuj Dock", L"Restart Dock") : L(L"Pokreni Dock", L"Start Dock"), b, fCenter_.get(), Ink());
-    hits_.push_back({Hit::Kind::Button, id, b, [this](float) {
-                         if (dockRunning_) RestartDock();
-                         else ShellExecuteW(nullptr, L"open", (ExeDir() + L"\\DockX.exe").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-                     }});
+    auto button = [this](const D2D1_RECT_F& r, const wchar_t* text, bool danger, std::function<void()> act) {
+        const int id = NextId();
+        if (danger) Fill(r, D2D1::ColorF(0.9f, 0.25f, 0.25f, id == hot_ ? 0.32f : 0.2f), 7);
+        else Fill(r, id == hot_ ? Ink(0.14f) : Ink(0.09f), 7);
+        Text(text, r, fCenter_.get(), danger ? D2D1::ColorF(1, 0.55f, 0.55f) : Ink());
+        hits_.push_back({Hit::Kind::Button, id, r, [act](float) { act(); }});
+    };
+    if (dockRunning_) {
+        button(D2D1::RectF(16, H_ - 96, kSidebarW - 16, H_ - 62), L(L"Restartuj Dock", L"Restart Dock"), false, [this] { RestartDock(); });
+        button(D2D1::RectF(16, H_ - 56, kSidebarW - 16, H_ - 22), L(L"Ugasi Dock", L"Quit Dock"), true, [this] { QuitDock(); });
+    } else {
+        button(D2D1::RectF(16, H_ - 58, kSidebarW - 16, H_ - 24), L(L"Pokreni Dock", L"Start Dock"), false, [this] { StartDock(); });
+    }
+}
+
+// Quits the running dock. Everything it changed (taskbar, screen space, the Windows
+// minimize animation) is put back, as with "Quit DockX" in the dock's own menu.
+void App::QuitDock() {
+    if (dirty_) Flush();
+    if (HWND dock = FindDock()) PostMessageW(dock, WM_CLOSE, 0, 0);
+    dockRunning_ = false;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void App::StartDock() {
+    if (dirty_) Flush();
+    ShellExecuteW(nullptr, L"open", (ExeDir() + L"\\DockX.exe").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 void App::PageAppearance() {
@@ -709,7 +731,9 @@ void App::PageAdvanced() {
              {L(L"Uvezi…", L"Import…"), [this] { Import(); }}});
     Buttons({{L(L"Otvori config fajl", L"Open config file"),
               [] { ShellExecuteW(nullptr, L"open", L"notepad.exe", (L"\"" + dx::ConfigPath() + L"\"").c_str(), nullptr, SW_SHOWNORMAL); }},
-             {L(L"Restartuj Dock", L"Restart Dock"), [this] { RestartDock(); }}});
+             {L(L"Restartuj Dock", L"Restart Dock"), [this] { RestartDock(); }},
+             {L(L"Ugasi Dock", L"Quit Dock"), [this] { QuitDock(); }},
+             {L(L"Pokreni Dock", L"Start Dock"), [this] { StartDock(); }}});
     EndCard();
 }
 

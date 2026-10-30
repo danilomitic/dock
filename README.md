@@ -64,7 +64,7 @@ A separate settings app in the style of macOS System Settings (`DockX.Settings.e
 | To | Do this |
 | --- | --- |
 | Start DockX | Start menu › **DockX** (it also starts with Windows) |
-| Quit DockX | Right-click the strip under the icons (or a separator) › **Quit DockX** |
+| Quit DockX | **DockX Settings** › **Quit Dock** (bottom left), or right-click the strip under the icons › **Quit DockX** |
 | Hide the dock / bring it back | Click the chevron button at the end of the dock, or press **Ctrl+Alt+D**; when hidden, move the mouse to the screen edge |
 | Change settings | Right-click the strip under the icons › **Dock Settings…** |
 | Add an app | Drag it (or its shortcut) from the desktop / Explorer onto the dock |
